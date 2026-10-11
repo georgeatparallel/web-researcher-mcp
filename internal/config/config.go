@@ -13,18 +13,24 @@ import (
 )
 
 type Config struct {
-	GoogleAPIKey                  string
-	GoogleCX                      string
-	Search                        SearchConfig
-	Port                          int
-	OAuth                         OAuthConfig
-	AllowedOrigins                []string
-	CORSStrict                    bool
-	HTTP                          HTTPConfig
-	CacheDir                      string
-	CacheMaxMemoryMB              int
-	CacheEncryptionKey            string
-	CacheEncryptionKeyPrev        string
+	GoogleAPIKey           string
+	GoogleCX               string
+	Search                 SearchConfig
+	Port                   int
+	OAuth                  OAuthConfig
+	AllowedOrigins         []string
+	CORSStrict             bool
+	HTTP                   HTTPConfig
+	CacheDir               string
+	CacheMaxMemoryMB       int
+	CacheEncryptionKey     string
+	CacheEncryptionKeyPrev string
+	// Cookie vault (#241). Only meaningful when Features.CookieVault is true; Load
+	// validates the key (64 hex, distinct from the cache keys) and the bounds.
+	CookieVaultKey                string
+	CookieVaultTTL                time.Duration // max lifetime of any stored cookie bundle
+	MaxConcurrentCaptures         int           // simultaneous headed login captures
+	CookieCaptureTimeout          time.Duration // how long a site_login window may stay open
 	CacheIsolation                string
 	RedisURL                      string
 	RateLimit                     RateLimitConfig
@@ -108,6 +114,7 @@ type FeatureConfig struct {
 	UserAnalytics bool // #92 opt-in per-user analytics
 	Workspaces    bool // #96 opt-in shared research workspaces
 	Monitoring    bool // #273 opt-in saved query-monitor persistence
+	CookieVault   bool // #241 opt-in encrypted cookie vault for login-gated scraping
 
 	// MemoryRetention bounds how long a saved memory lives before auto-expiry
 	// (#88). 0 → the store's default (90 days). "Data doesn't exist after TTL"
@@ -126,7 +133,7 @@ type FeatureConfig struct {
 // RegulatedEnabled reports whether any consent-gated feature is on, which is
 // the sole trigger for activating the consent subsystem.
 func (f FeatureConfig) RegulatedEnabled() bool {
-	return f.Memory || f.UserAnalytics || f.Workspaces || f.Monitoring
+	return f.Memory || f.UserAnalytics || f.Workspaces || f.Monitoring || f.CookieVault
 }
 
 type AuditConfig struct {
@@ -379,6 +386,34 @@ func Load() (*Config, error) {
 		errs = append(errs, "CACHE_ENCRYPTION_KEY_PREV must be exactly 64 hex characters")
 	}
 
+	// Cookie vault (#241): the vault key protects session credentials, so it must
+	// never equal a cache key (a cache-key leak or rotation must not expose or
+	// invalidate stored logins).
+	cookieVaultEnabled := envBool("COOKIE_VAULT_ENABLED", false)
+	cookieVaultKey := os.Getenv("COOKIE_VAULT_ENCRYPTION_KEY")
+	cookieVaultTTL := envDuration("COOKIE_VAULT_TTL", maxCookieVaultTTLDefault)
+	maxCaptures := envInt("MAX_CONCURRENT_CAPTURES", 1)
+	captureTimeout := envDuration("COOKIE_CAPTURE_TIMEOUT", 5*time.Minute)
+	if cookieVaultEnabled {
+		switch {
+		case cookieVaultKey == "":
+			errs = append(errs, "COOKIE_VAULT_ENCRYPTION_KEY is required when COOKIE_VAULT_ENABLED=true")
+		case !isHex64(cookieVaultKey):
+			errs = append(errs, "COOKIE_VAULT_ENCRYPTION_KEY must be exactly 64 hex characters")
+		case strings.EqualFold(cookieVaultKey, encKey) || strings.EqualFold(cookieVaultKey, encKeyPrev):
+			errs = append(errs, "COOKIE_VAULT_ENCRYPTION_KEY must differ from CACHE_ENCRYPTION_KEY")
+		}
+		if cookieVaultTTL <= 0 || cookieVaultTTL > maxCookieVaultTTL {
+			errs = append(errs, "COOKIE_VAULT_TTL must be between 1s and 720h")
+		}
+		if maxCaptures < 1 || maxCaptures > 5 {
+			errs = append(errs, "MAX_CONCURRENT_CAPTURES must be between 1 and 5")
+		}
+		if captureTimeout < 30*time.Second || captureTimeout > 15*time.Minute {
+			errs = append(errs, "COOKIE_CAPTURE_TIMEOUT must be between 30s and 15m")
+		}
+	}
+
 	// ADMIN_API_KEY gates every /admin/* endpoint (cache flush, session flush,
 	// GDPR data-subject rights, tenant analytics, workspace membership). The
 	// legacy CACHE_ADMIN_KEY name is still accepted for backward compatibility
@@ -534,6 +569,10 @@ func Load() (*Config, error) {
 		CacheMaxMemoryMB:       envInt("CACHE_MAX_MEMORY_MB", 64),
 		CacheEncryptionKey:     encKey,
 		CacheEncryptionKeyPrev: encKeyPrev,
+		CookieVaultKey:         cookieVaultKey,
+		CookieVaultTTL:         cookieVaultTTL,
+		MaxConcurrentCaptures:  maxCaptures,
+		CookieCaptureTimeout:   captureTimeout,
 		CacheIsolation:         envOrDefault("CACHE_ISOLATION", "shared"),
 		RedisURL:               os.Getenv("REDIS_URL"),
 		RateLimit: RateLimitConfig{
@@ -583,6 +622,7 @@ func Load() (*Config, error) {
 			UserAnalytics:         envBool("USER_ANALYTICS_ENABLED", false),
 			Workspaces:            envBool("WORKSPACES_ENABLED", false),
 			Monitoring:            envBool("MONITORING_ENABLED", false),
+			CookieVault:           cookieVaultEnabled,
 			MemoryRetention:       envDuration("MEMORY_RETENTION", 90*24*time.Hour),
 			WorkspaceTTL:          envDuration("WORKSPACE_TTL", 30*24*time.Hour),
 			MonitoringTTL:         envDuration("MONITORING_TTL", 30*24*time.Hour),
@@ -690,6 +730,13 @@ func envBool(key string, fallback bool) bool {
 
 // isHex64 reports whether s is exactly 64 lowercase/uppercase hex characters,
 // matching the AES-256 key encoding used for CACHE_ENCRYPTION_KEY.
+// Cookie vault bundle lifetime: 24h default (session cookies must not outlive a
+// working day), hard-capped at 30 days (#241).
+const (
+	maxCookieVaultTTLDefault = 24 * time.Hour
+	maxCookieVaultTTL        = 30 * 24 * time.Hour
+)
+
 func isHex64(s string) bool {
 	if len(s) != 64 {
 		return false
