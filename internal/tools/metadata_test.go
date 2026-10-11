@@ -51,6 +51,8 @@ var expectedTools = []string{
 	"research_panel",
 	"monitor_query_save",
 	"monitor_query_check",
+	"site_login",
+	"site_logout",
 }
 
 func listTools(t *testing.T) []*mcp.Tool {
@@ -91,7 +93,7 @@ func TestAllToolsHaveAnnotations(t *testing.T) {
 			// memory_save is the one WRITE tool (it persists a memory). Every
 			// other tool is read-only. No tool is ever destructive — deletion is
 			// the separate #85 erasure endpoint, never a tool flag.
-			writeTools := map[string]bool{"memory_save": true, "workspace_contribute": true, "archive_source": true, "monitor_query_save": true}
+			writeTools := map[string]bool{"memory_save": true, "workspace_contribute": true, "archive_source": true, "monitor_query_save": true, "site_login": true, "site_logout": true}
 			if writeTools[tool.Name] {
 				if tool.Annotations.ReadOnlyHint {
 					t.Errorf("%s writes state; ReadOnlyHint should be false", tool.Name)
@@ -203,6 +205,23 @@ func TestAllToolsHaveAnnotations(t *testing.T) {
 				if *tool.Annotations.OpenWorldHint {
 					t.Error("monitor_query_save should NOT be open-world")
 				}
+			case "site_login":
+				// A write (stores cookies); not idempotent (each call opens a new
+				// login and replaces the bundle). writeAnnotations forces open-world false.
+				if tool.Annotations.IdempotentHint {
+					t.Error("site_login should NOT be idempotent")
+				}
+				if *tool.Annotations.OpenWorldHint {
+					t.Error("site_login should NOT be open-world")
+				}
+			case "site_logout":
+				// A write (deletes a bundle); idempotent (deleting twice is the same state).
+				if !tool.Annotations.IdempotentHint {
+					t.Error("site_logout should be idempotent")
+				}
+				if *tool.Annotations.OpenWorldHint {
+					t.Error("site_logout should NOT be open-world")
+				}
 			case "monitor_query_check":
 				// Read-only but mutates the stored baseline on every call (marks
 				// found URLs as seen), so a second identical call returns zero new
@@ -307,6 +326,10 @@ func TestOutputSchemaMatchesResponse(t *testing.T) {
 		// monitor_test.go's authenticated-context tests).
 		"monitor_query_save":  {"query": "test"},
 		"monitor_query_check": {"query": "test"},
+		// Anonymous caller: both return status "unavailable" (authenticated paths
+		// are covered in site_session_test.go).
+		"site_login":  {"url": "https://example.com/login"},
+		"site_logout": {"domain": "example.com"},
 	}
 
 	tools := listTools(t)

@@ -216,6 +216,7 @@ var scrapePageOutputSchema = map[string]any{
 		"estimatedTokens":   map[string]any{"type": "integer"},
 		"sizeCategory":      map[string]any{"type": "string"},
 		"raw":               map[string]any{"type": "boolean"},
+		"authenticated":     map[string]any{"type": "boolean", "description": "True when the page was fetched with your saved site_login cookies. Such results are never cached. Omitted for anonymous scrapes."},
 		"extractedBy":       map[string]any{"type": "string", "description": "Which extraction tier produced the content (markdown, stealth, jina, html, browser, or exa:cached/exa:crawled for the paid Exa fallback). Provenance only; omitted when unknown."},
 		"citation": map[string]any{
 			"type": "object",
@@ -528,6 +529,28 @@ var memorySaveOutputSchema = map[string]any{
 		"reason":    map[string]any{"type": "string"},
 		"id":        map[string]any{"type": "string"},
 		"createdAt": map[string]any{"type": "string"},
+	},
+}
+
+var siteLoginOutputSchema = map[string]any{
+	"type": "object",
+	"properties": map[string]any{
+		"status":      map[string]any{"type": "string"}, // ok | no_consent | unavailable | busy | timeout | invalid_url | blocked | nothing_captured | failed
+		"reason":      map[string]any{"type": "string"},
+		"domain":      map[string]any{"type": "string"},
+		"cookieCount": map[string]any{"type": "integer"},
+		"capturedAt":  map[string]any{"type": "string"},
+		"expiresAt":   map[string]any{"type": "string"},
+	},
+}
+
+var siteLogoutOutputSchema = map[string]any{
+	"type": "object",
+	"properties": map[string]any{
+		"status":  map[string]any{"type": "string"}, // ok | unavailable
+		"reason":  map[string]any{"type": "string"},
+		"domain":  map[string]any{"type": "string"},
+		"removed": map[string]any{"type": "boolean"},
 	},
 }
 

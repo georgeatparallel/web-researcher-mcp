@@ -146,6 +146,7 @@ type ScrapeOutput struct {
     SizeCategory    string    `json:"sizeCategory"`   // small, medium, large, very_large
     Citation        *Citation `json:"citation"`       // always present
     Raw             bool      `json:"raw,omitempty"`  // true only in raw mode; omitted otherwise
+    Authenticated   bool      `json:"authenticated,omitempty"` // true only when saved site_login cookies were sent (#241); such results are never cached
     ExtractedBy     string    `json:"extractedBy,omitempty"` // extraction tier: markdown|stealth|jina|html|browser|exa:cached|exa:crawled; omitted when unknown
     ExtractionQuality string  `json:"extractionQuality,omitempty"` // complete when the pipeline returned a confident extraction; partial when every tier was exhausted and the best-quality candidate was returned instead. Never an error. Omitted in raw mode.
     WordCount         int     `json:"wordCount,omitempty"`         // words in the extracted content (#358); orthogonal to ExtractionQuality — a "complete" extraction can still be a thin paywall/bot-wall stub. Omitted in raw mode.
@@ -273,6 +274,8 @@ In `raw` mode the output additionally carries `"raw": true`, and `contentType` i
 **Forum engagement signals (#247).** For Reddit posts where the HTML extraction tier ran, the response carries a `forumSignals` object: `platform` (`"reddit"`), `upvotes` (vote count from JSON-LD `interactionStatistic`), `comments` (comment count), `datePublished` (ISO 8601), `authorName` (original poster), and `credibilityNote` (set when `upvotes < 20`, noting vote-manipulation risk). The field is **omitted entirely** for non-Reddit/non-Bluesky URLs, `raw` mode, and any non-HTML extraction tier (markdown, browser, document, YouTube, Twitter) — never `null`, only present-or-absent. For Twitter/X tweets (`contentType: "twitter"`), engagement signals (likes, retweets, replies, quotes, views) are embedded in the plain-text `content` string by the FxTwitter path — they are not surfaced as a separate structured field. For Bluesky posts (bsky.app), `forumSignals` carries `platform: "bluesky"`, `upvotes` (like count), `comments` (reply count), and `authorName` (displayName from the AT Protocol author record) — read natively via `app.bsky.feed.getPostThread`, not extracted from HTML (#285). When available, `topComments` carries up to 5 top comments (by score descending) fetched from the Reddit shreddit endpoint — each with `author`, `score`, `body` (plain text, max 500 chars; `[deleted]`/`[removed]` bodies are skipped), `permalink`, and `created`. The comment fetch is best-effort: a timeout (5 s), 429, or parse error silently omits the field without affecting the rest of the result.
 
 **Structured data (#46).** When the page embeds machine-readable metadata, the response carries a `structuredData` object alongside `content`: `jsonLd` (each `<script type="application/ld+json">` block, kept verbatim — invalid JSON is skipped, never failing the scrape), `openGraph` (`og:*`/`article:*` meta, keys keep their prefix), and `citation` (Highwire `citation_*` meta — DOI, authors, journal). The whole object is omitted when no such markup is present, and each sub-field is omitted when empty. It is produced by the HTML-extraction tiers only (absent for `raw` mode, PDFs, YouTube, and markdown-tier results), is independently size-bounded so a pathological page cannot blow the response budget, and is **untrusted external data** under the same trust boundary as `content`.
+
+**Saved logins (#241).** When the cookie vault is enabled and the caller has saved a login for the page's site with `site_login` and consented to `session_capture`, `scrape_page` sends those cookies automatically and sets `authenticated: true`. Cookies go only to that site's registrable domain (never to a redirect on another host) and never over plain http if marked `Secure`. A vault-backed scrape skips the shared cache, the negative cache, the artifact store, the native API routes (documents excepted) and the Jina and Exa cloud tiers. It is returned inline, even in `raw` mode. Without a saved login, consent or an identified user, the scrape runs anonymously as before.
 
 **Extraction provenance (`extractedBy`).** When known, the response names the tier that produced the content: `markdown`, `stealth`, `jina`, `html`, `browser`, `github:raw`/`github:contents-api`/`github:gist-api`, or — for the paid Exa fallback — `exa:cached` / `exa:crawled`. It lets a caller see whether content came from a free local tier or the metered Exa `/contents` API (Tier 5, present only when `EXA_API_KEY` is set). Omitted when unknown (e.g. document/YouTube routes).
 
@@ -404,6 +407,7 @@ Note: twitter.com and x.com are **not** in the SPA list — they use a dedicated
 ### Cache
 - Key: SHA-256 of (`url` + `mode` + `max_length`) — `max_length` is part of the key so a larger request never serves a shorter cached body
 - TTL: 1 hour
+- Not used for vault-backed (`authenticated: true`) scrapes: they neither read nor write the cache.
 
 ### Error Taxonomy (`internal/scraper/errors.go`)
 
@@ -1994,6 +1998,78 @@ Requires an authenticated user and recorded consent for the `monitoring` purpose
 ### Cache
 
 - Not cached (always issues a live search to diff against the stored baseline).
+
+---
+
+## Tool 35: `site_login`
+
+**Opt-in, consent-gated (#241). Registered only when `COOKIE_VAULT_ENABLED=true` in STDIO mode with a local Chrome.** A **write** tool (stores cookies), **not idempotent**, not open-world.
+
+### Purpose
+
+Let you sign in to a website by hand so `scrape_page` can read pages behind that login. A visible browser window opens on the URL. You log in (2FA and CAPTCHA included) and close the window. Only the resulting cookies are saved, never your password. Use it only on sites whose terms of service allow automated access on your behalf.
+
+### Input Schema
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `url` | string | yes | http(s) login page. Must have a registrable domain (no IP addresses, `localhost` or bare public suffixes) and no embedded credentials. Private and internal hosts are refused |
+
+### Output Schema
+
+```go
+type SiteLoginOutput struct {
+    Status      string `json:"status"`                // "ok" | "no_consent" | "unavailable" | "busy" | "timeout" | "invalid_url" | "blocked" | "nothing_captured" | "failed"
+    Reason      string `json:"reason,omitempty"`
+    Domain      string `json:"domain,omitempty"`      // registrable domain the cookies are scoped to
+    CookieCount int    `json:"cookieCount,omitempty"` // count only; names and values are never returned
+    CapturedAt  string `json:"capturedAt,omitempty"`  // RFC3339
+    ExpiresAt   string `json:"expiresAt,omitempty"`   // RFC3339; never later than COOKIE_VAULT_TTL from capture
+}
+```
+
+### Behavior
+
+Requires an identified user and recorded consent for the `session_capture` purpose, which is never granted automatically; otherwise returns `unavailable` / `no_consent` and opens no browser. The host is checked for SSRF before the browser launches. The call blocks until you close the window or `COOKIE_CAPTURE_TIMEOUT` passes (`timeout`: nothing is saved). At most `MAX_CONCURRENT_CAPTURES` windows run at once (`busy`). The browser profile is a temporary directory deleted on every exit path. Cookies are stored AES-256-GCM encrypted per (tenant, user, registrable domain), replace any earlier login for that domain, and are included in data-subject export (counts only) and erasure.
+
+### Cache
+
+- Not cached.
+
+---
+
+## Tool 36: `site_logout`
+
+**Opt-in (#241). Registered whenever the cookie vault is enabled.** A **write** tool (deletes stored cookies), **idempotent**, not open-world.
+
+### Purpose
+
+Forget a saved login. Deletes the stored cookies for a site's registrable domain.
+
+### Input Schema
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `domain` | string | yes | Hostname (`example.com`) or a URL on it. Reduced to the registrable domain |
+
+### Output Schema
+
+```go
+type SiteLogoutOutput struct {
+    Status  string `json:"status"`           // "ok" | "unavailable"
+    Reason  string `json:"reason,omitempty"`
+    Domain  string `json:"domain,omitempty"` // registrable domain that was addressed
+    Removed bool   `json:"removed"`          // false when nothing was saved (not an error)
+}
+```
+
+### Behavior
+
+Requires an identified user. Needs no consent: erasure is always allowed. Vault-backed scrapes never write to the shared cache, so there is no cached page content to clear.
+
+### Cache
+
+- Not cached.
 
 ---
 

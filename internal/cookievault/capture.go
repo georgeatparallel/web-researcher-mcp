@@ -16,6 +16,9 @@ var (
 	ErrCaptureTimeout  = errors.New("cookievault: login window was not closed before the timeout")
 	ErrInvalidLoginURL = errors.New("cookievault: login URL must be http(s) with a registrable domain")
 	ErrNothingCaptured = errors.New("cookievault: no cookies were set for this domain")
+	// ErrLoginURLRejected wraps the HostValidator error when the login host is
+	// not allowed (e.g. a private address).
+	ErrLoginURLRejected = errors.New("cookievault: login URL host is not allowed")
 )
 
 const capturePollInterval = 500 * time.Millisecond
@@ -81,7 +84,7 @@ func (c *Capturer) Capture(ctx context.Context, loginURL string) (string, []Cook
 	}
 	if c.validate != nil {
 		if err := c.validate(ctx, u.Hostname()); err != nil {
-			return "", nil, fmt.Errorf("login URL rejected: %w", err)
+			return "", nil, fmt.Errorf("%w: %w", ErrLoginURLRejected, err)
 		}
 	}
 

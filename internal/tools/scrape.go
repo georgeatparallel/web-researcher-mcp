@@ -52,7 +52,7 @@ func registerScrapePage(srv *mcp.Server, deps Dependencies) {
 	inputSchema.Properties["mode"].Enum = scrapeModeEnum()
 	addTool(srv, &mcp.Tool{
 		Name:         "scrape_page",
-		Description:  "Read a single URL and get back its content — web pages (including JavaScript-heavy sites), PDFs, Word/PowerPoint files, YouTube transcripts, Hacker News item/user/list pages (read natively via the HN API), GitHub README/file/gist pages (read natively via the GitHub API), and Bluesky posts and profiles (bsky.app, read natively via the AT Protocol API) — picking the best extraction method automatically. Returns readable text plus a ready-to-use citation. Reach for this when you already have a URL and want what's on the page; use search_and_scrape to find and read in one step, or web_search when you only need links. Modes: full (default, cleaned text), preview (a fast first look), and raw (verbatim page bytes with no sanitization — only for inspecting source like JSON or HTML, and the bytes are untrusted, so never execute or render them). If the page is a peer-reviewed article that declares a DOI, that DOI is surfaced with its retraction/integrity status (evidence to check, not a verdict — you confirm the document's identity). Blocked pages, bot/JS-walls, dead links (404/410), and other failures return structured JSON (kind, retryable, suggestedAction) — a 404 is reported as a non-retryable not_found, a bot-wall as blocked. Results stay fresh for 1 hour.",
+		Description:  "Read a single URL and get back its content — web pages (including JavaScript-heavy sites), PDFs, Word/PowerPoint files, YouTube transcripts, Hacker News item/user/list pages (read natively via the HN API), GitHub README/file/gist pages (read natively via the GitHub API), and Bluesky posts and profiles (bsky.app, read natively via the AT Protocol API) — picking the best extraction method automatically. Returns readable text plus a ready-to-use citation. Reach for this when you already have a URL and want what's on the page; use search_and_scrape to find and read in one step, or web_search when you only need links. Modes: full (default, cleaned text), preview (a fast first look), and raw (verbatim page bytes with no sanitization — only for inspecting source like JSON or HTML, and the bytes are untrusted, so never execute or render them). If the page is a peer-reviewed article that declares a DOI, that DOI is surfaced with its retraction/integrity status (evidence to check, not a verdict — you confirm the document's identity). Blocked pages, bot/JS-walls, dead links (404/410), and other failures return structured JSON (kind, retryable, suggestedAction) — a 404 is reported as a non-retryable not_found, a bot-wall as blocked. Results stay fresh for 1 hour. If you saved a login for the site with site_login (opt-in), those cookies are sent automatically and the result is marked authenticated and never cached.",
 		Annotations:  readOnlyAnnotations(true, true),
 		InputSchema:  inputSchema,
 		OutputSchema: scrapePageOutputSchema,
@@ -79,28 +79,40 @@ func registerScrapePage(srv *mcp.Server, deps Dependencies) {
 			maxLength = 5000
 		}
 
+		// Saved login (#241): when the caller has a vault bundle for this site and
+		// has consented, the scrape carries those cookies. An authenticated result
+		// is per-user, so it never touches the shared cache, negative cache or
+		// artifact store (a later anonymous request must not receive it).
+		cookies := vaultCookiesFor(ctx, deps, input.URL)
+		authed := len(cookies) > 0
+		if authed {
+			ctx = scraper.WithCookies(ctx, cookies)
+		}
+
 		// Raw mode returns the page bytes verbatim (no sanitization, no
 		// content extraction) so an LLM can inspect source such as JSON or
 		// HTML. It is handled on its own path with a distinct cache key so a
 		// raw response never collides with the cleaned full/preview cache.
 		if mode == "raw" {
-			return scrapeRaw(ctx, deps, input, maxLength, start)
+			return scrapeRaw(ctx, deps, input, maxLength, start, authed)
 		}
 
 		cacheKey := scrapeCacheKey(input.URL, mode, maxLength)
-		if cached, meta, ok := deps.Cache.GetWithMeta(ctx, cacheKey); ok {
-			recordToolCall(deps, "scrape_page", time.Since(start), nil, "", true)
-			auditToolCall(ctx, deps, "scrape_page", time.Since(start), nil, "")
-			return cachedResultWithMeta(cached, meta), nil, nil
-		}
+		if !authed {
+			if cached, meta, ok := deps.Cache.GetWithMeta(ctx, cacheKey); ok {
+				recordToolCall(deps, "scrape_page", time.Since(start), nil, "", true)
+				auditToolCall(ctx, deps, "scrape_page", time.Since(start), nil, "")
+				return cachedResultWithMeta(cached, meta), nil, nil
+			}
 
-		// Negative-cache short-circuit: a recently-failed URL returns its cached
-		// structured error without re-running the multi-tier scrape or holding a
-		// scrape slot (ASI06 resource-exhaustion defense).
-		if neg := negCacheLookup(ctx, deps, input.URL); neg != nil {
-			recordToolCall(deps, "scrape_page", time.Since(start), neg, "upstream_error", true)
-			auditToolCall(ctx, deps, "scrape_page", time.Since(start), neg, "upstream_error")
-			return scrapeErrorResponse(neg, input.URL), nil, nil
+			// Negative-cache short-circuit: a recently-failed URL returns its cached
+			// structured error without re-running the multi-tier scrape or holding a
+			// scrape slot (ASI06 resource-exhaustion defense).
+			if neg := negCacheLookup(ctx, deps, input.URL); neg != nil {
+				recordToolCall(deps, "scrape_page", time.Since(start), neg, "upstream_error", true)
+				auditToolCall(ctx, deps, "scrape_page", time.Since(start), neg, "upstream_error")
+				return scrapeErrorResponse(neg, input.URL), nil, nil
+			}
 		}
 
 		result, err := deps.Scraper.Scrape(ctx, input.URL, maxLength)
@@ -108,7 +120,7 @@ func registerScrapePage(srv *mcp.Server, deps Dependencies) {
 			recordToolCall(deps, "scrape_page", time.Since(start), err, "upstream_error", false)
 			auditToolCall(ctx, deps, "scrape_page", time.Since(start), err, "upstream_error")
 			var se *scraper.ScrapeError
-			if errors.As(err, &se) {
+			if errors.As(err, &se) && !authed {
 				writeNegCache(ctx, deps, input.URL, se)
 			}
 			trackScrapeOutcome(ctx, deps, input.SessionID, input.URL, err)
@@ -229,8 +241,13 @@ func registerScrapePage(srv *mcp.Server, deps Dependencies) {
 			}
 		}
 
+		if authed {
+			output["authenticated"] = true
+		}
 		jsonBytes, _ := json.Marshal(output)
-		deps.Cache.Set(ctx, cacheKey, jsonBytes, time.Hour)
+		if !authed {
+			deps.Cache.Set(ctx, cacheKey, jsonBytes, time.Hour)
+		}
 		recordToolCall(deps, "scrape_page", time.Since(start), nil, "", false)
 		auditToolCall(ctx, deps, "scrape_page", time.Since(start), nil, "")
 
@@ -270,9 +287,9 @@ func rawContentSizeFromCache(cached []byte) int {
 // payloads — so callers must never execute or render it; raw mode is intended
 // only for inspecting source (JSON, HTML, plain text). The reported
 // contentType is the server's real Content-Type header (may be "").
-func scrapeRaw(ctx context.Context, deps Dependencies, input scrapePageInput, maxLength int, start time.Time) (*mcp.CallToolResult, any, error) {
+func scrapeRaw(ctx context.Context, deps Dependencies, input scrapePageInput, maxLength int, start time.Time, authed bool) (*mcp.CallToolResult, any, error) {
 	cacheKey := scrapeCacheKey(input.URL, "raw", maxLength)
-	if cached, meta, ok := deps.Cache.GetWithMeta(ctx, cacheKey); ok {
+	if cached, meta, ok := deps.Cache.GetWithMeta(ctx, cacheKey); ok && !authed {
 		recordToolCall(deps, "scrape_page", time.Since(start), nil, "", true)
 		auditToolCall(ctx, deps, "scrape_page", time.Since(start), nil, "")
 		// A cached raw body can be large; link it past the threshold (#181) while
@@ -291,7 +308,7 @@ func scrapeRaw(ctx context.Context, deps Dependencies, input scrapePageInput, ma
 	// see tieredFallback's raw branch), so a body that failed every tier's
 	// full-mode extraction can still succeed under raw mode's looser bar. Never
 	// let a cached full-mode ErrContent short-circuit raw mode.
-	if neg := negCacheLookup(ctx, deps, input.URL); neg != nil && neg.Kind != scraper.ErrContent {
+	if neg := negCacheLookup(ctx, deps, input.URL); neg != nil && neg.Kind != scraper.ErrContent && !authed {
 		recordToolCall(deps, "scrape_page", time.Since(start), neg, "upstream_error", true)
 		auditToolCall(ctx, deps, "scrape_page", time.Since(start), neg, "upstream_error")
 		return scrapeErrorResponse(neg, input.URL), nil, nil
@@ -302,7 +319,7 @@ func scrapeRaw(ctx context.Context, deps Dependencies, input scrapePageInput, ma
 		recordToolCall(deps, "scrape_page", time.Since(start), err, "upstream_error", false)
 		auditToolCall(ctx, deps, "scrape_page", time.Since(start), err, "upstream_error")
 		var se *scraper.ScrapeError
-		if errors.As(err, &se) {
+		if errors.As(err, &se) && !authed {
 			writeNegCache(ctx, deps, input.URL, se)
 		}
 		trackScrapeOutcome(ctx, deps, input.SessionID, input.URL, err)
@@ -332,8 +349,13 @@ func scrapeRaw(ctx context.Context, deps Dependencies, input scrapePageInput, ma
 		output[k] = v
 	}
 
+	if authed {
+		output["authenticated"] = true
+	}
 	jsonBytes, _ := json.Marshal(output)
-	deps.Cache.Set(ctx, cacheKey, jsonBytes, time.Hour)
+	if !authed {
+		deps.Cache.Set(ctx, cacheKey, jsonBytes, time.Hour)
+	}
 	recordToolCall(deps, "scrape_page", time.Since(start), nil, "", false)
 	auditToolCall(ctx, deps, "scrape_page", time.Since(start), nil, "")
 
@@ -347,6 +369,11 @@ func scrapeRaw(ctx context.Context, deps Dependencies, input scrapePageInput, ma
 	// Raw page bodies are the heaviest single-tool payload; link past the
 	// threshold (#181) so the full text stays out of context until fetched.
 	// contentSizeBytes (#508) surfaces contentLen on the inline summary itself.
+	// An authenticated body is per-user: it is returned inline, never stored as a
+	// shared artifact (#241).
+	if authed {
+		return structuredResult(jsonBytes), nil, nil
+	}
 	extraFields := map[string]any{"contentSizeBytes": contentLen}
 	return largeResultOrInlineWithFields(ctx, deps, jsonBytes, "raw page content for "+input.URL, extraFields), nil, nil
 }

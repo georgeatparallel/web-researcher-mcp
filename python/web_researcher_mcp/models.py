@@ -1999,6 +1999,7 @@ class ScrapePageMetadata:
 
 @dataclass
 class ScrapePageResponse:
+    authenticated: Optional[bool] = None
     authorityTier: Optional[str] = None
     citation: Optional[Citation] = None
     content: Optional[str] = None
@@ -2030,6 +2031,7 @@ class ScrapePageResponse:
         if d is None:
             return None
         return cls(
+            authenticated=d.get('authenticated'),
             authorityTier=d.get('authorityTier'),
             citation=Citation.from_dict(d.get('citation')) if d.get('citation') else None,
             content=d.get('content'),

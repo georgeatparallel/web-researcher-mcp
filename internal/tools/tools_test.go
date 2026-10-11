@@ -26,6 +26,7 @@ import (
 	"github.com/zoharbabin/web-researcher-mcp/internal/config"
 	"github.com/zoharbabin/web-researcher-mcp/internal/consent"
 	"github.com/zoharbabin/web-researcher-mcp/internal/content"
+	"github.com/zoharbabin/web-researcher-mcp/internal/cookievault"
 	"github.com/zoharbabin/web-researcher-mcp/internal/memory"
 	"github.com/zoharbabin/web-researcher-mcp/internal/metrics"
 	"github.com/zoharbabin/web-researcher-mcp/internal/persist"
@@ -392,6 +393,8 @@ func setupTestDeps() Dependencies {
 		Memory:          memory.NewStore(persist.NewMemoryStore(), 0),
 		Workspaces:      workspace.NewStore(persist.NewMemoryStore(), 0),
 		Monitor:         persist.NewMemoryStore(),
+		CookieVault:     cookievault.NewPersistStore(persist.NewMemoryStore(), time.Hour),
+		CookieCapturer:  cookievault.NewCapturer(&fakeLoginDriver{}, nil, 1, time.Minute),
 		CTLogResolver:   &mockCTLogResolver{},
 		ArchiveResolver: &mockArchiveResolver{},
 		ResearchPanelProviders: []ModelProvider{
