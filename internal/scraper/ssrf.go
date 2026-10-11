@@ -183,3 +183,27 @@ func mustParseCIDR(s string) *net.IPNet {
 	}
 	return network
 }
+
+// ValidateHost applies the dial-time SSRF rules ahead of time: it fails when
+// host is a blocked metadata name, resolves to nothing, or (unless allowPrivate)
+// resolves to any private address. Callers use it before handing a host to
+// something that dials on its own, such as a browser (see issue #241).
+func ValidateHost(ctx context.Context, host string, allowPrivate bool) error {
+	host = strings.Trim(host, "[]")
+	if isBlockedHostname(host) {
+		return ErrSSRFBlocked
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return err
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("no IP addresses found for %s", host)
+	}
+	for _, ip := range ips {
+		if !allowPrivate && isPrivateIP(ip.IP) {
+			return ErrSSRFBlocked
+		}
+	}
+	return nil
+}

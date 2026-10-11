@@ -97,7 +97,11 @@ func (p *Pipeline) scrapeDocument(ctx context.Context, url string, maxLength int
 
 	req.Header.Set("User-Agent", "web-researcher-mcp/1.0")
 
-	resp, err := p.client.Do(req)
+	client, err := clientWithCookies(ctx, p.client)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, networkError(url, "document", err)
 	}

@@ -459,6 +459,13 @@ func (p *Pipeline) Scrape(ctx context.Context, rawURL string, maxLength int) (*S
 		nativeRoute = func() (*ScrapeResult, error) { return p.scrapeDocument(ctx, url, maxLength) }
 	}
 
+	// A scrape carrying vault cookies (issue #241) must read the login-gated page
+	// itself: the API-backed native routes would return the public view instead,
+	// so only document downloads keep their route (they send the cookies too).
+	if len(cookiesFrom(ctx)) > 0 && !isDocRoute {
+		nativeRoute = nil
+	}
+
 	var result *ScrapeResult
 	var err error
 	if nativeRoute != nil {
@@ -578,7 +585,12 @@ func (p *Pipeline) tieredFallback(ctx context.Context, url string, maxLength, de
 	// regular pipeline" — a third party's rendering doesn't satisfy that, so
 	// both are excluded when raw=true rather than mislabeling their output as
 	// the page's own raw body.
-	if !raw {
+	//
+	// A scrape carrying vault cookies (issue #241) also skips both: neither can
+	// see a login-gated page, and the URL of an authenticated page should not be
+	// sent to a third party.
+	hasCookies := len(cookiesFrom(ctx)) > 0
+	if !raw && !hasCookies {
 		tiers = append(tiers, namedTier{"jina", p.scrapeJina})
 	}
 	tiers = append(tiers, namedTier{"html", p.scrapeHTML})
@@ -596,7 +608,7 @@ func (p *Pipeline) tieredFallback(ctx context.Context, url string, maxLength, de
 	// to follow speculatively. Also skipped entirely in raw mode (see jina
 	// above — same cloud-proxy incompatibility, plus it is a paid tier raw
 	// mode must never trigger).
-	if p.config.ExaAPIKey != "" && depth == 0 && !raw {
+	if p.config.ExaAPIKey != "" && depth == 0 && !raw && !hasCookies {
 		tiers = append(tiers, namedTier{"exa", p.scrapeExa})
 	}
 
@@ -981,6 +993,13 @@ func (p *Pipeline) ScrapeRaw(ctx context.Context, rawURL string, maxLength int) 
 		nativeRoute = func() (*ScrapeResult, error) { return p.scrapeGitHubContent(ctx, url, maxLength) }
 	case isDocRoute:
 		nativeRoute = func() (*ScrapeResult, error) { return p.scrapeDocument(ctx, url, maxLength) }
+	}
+
+	// A scrape carrying vault cookies (issue #241) must read the login-gated page
+	// itself: the API-backed native routes would return the public view instead,
+	// so only document downloads keep their route (they send the cookies too).
+	if len(cookiesFrom(ctx)) > 0 && !isDocRoute {
+		nativeRoute = nil
 	}
 
 	var result *ScrapeResult

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	neturl "net/url"
 	"strings"
 	"sync"
 	"time"
@@ -262,13 +263,51 @@ func (p *Pipeline) scrapeBrowser(ctx context.Context, url string, maxLength int,
 		return nil, browserError(url, bp.initErr, msg)
 	}
 
-	page, err := stealth.Page(browser)
+	// Vault-backed scrape (issue #241): the cookies live only in a fresh
+	// incognito context that is disposed on every exit path, so they can never
+	// reach the shared default context or a later scrape. The host is validated
+	// before any cookie is handed to Chromium.
+	cookies := cookiesFrom(ctx)
+	scope := browser
+	if len(cookies) > 0 {
+		if err := validateURLHost(ctx, url, p.config.AllowPrivateIPs); err != nil {
+			return nil, browserError(url, err, "cookie-bearing navigation blocked: "+err.Error())
+		}
+		incognito, err := browser.Incognito()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create incognito context: %w", err)
+		}
+		defer func() { _ = incognito.Close() }()
+		if err := incognito.SetCookies(toCDPCookies(cookies, time.Now())); err != nil {
+			return nil, fmt.Errorf("failed to set cookies: %w", err)
+		}
+		scope = incognito
+	}
+
+	page, err := stealth.Page(scope)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create stealth page: %w", err)
 	}
 	defer page.Close()
 
 	page = page.Context(ctx)
+
+	// Every main-frame hop (including redirects) is validated before Chromium
+	// sends it, so cookies cannot follow a redirect to a blocked host.
+	if len(cookies) > 0 {
+		router := page.HijackRequests()
+		if err := router.Add("*", proto.NetworkResourceTypeDocument, func(h *rod.Hijack) {
+			if verr := ValidateHost(ctx, h.Request.URL().Hostname(), p.config.AllowPrivateIPs); verr != nil {
+				h.Response.Fail(proto.NetworkErrorReasonBlockedByClient)
+				return
+			}
+			h.ContinueRequest(&proto.FetchContinueRequest{})
+		}); err != nil {
+			return nil, fmt.Errorf("failed to guard navigation: %w", err)
+		}
+		go router.Run()
+		defer func() { _ = router.Stop() }()
+	}
 
 	if err := page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
 		Width:  1920,
@@ -424,6 +463,15 @@ func (p *Pipeline) scrapeBrowser(ctx context.Context, url string, maxLength int,
 	}
 
 	return res, nil
+}
+
+// validateURLHost applies ValidateHost to rawURL's host.
+func validateURLHost(ctx context.Context, rawURL string, allowPrivate bool) error {
+	u, err := neturl.Parse(rawURL)
+	if err != nil {
+		return err
+	}
+	return ValidateHost(ctx, u.Hostname(), allowPrivate)
 }
 
 func extractPageContent(page *rod.Page) (string, error) {
