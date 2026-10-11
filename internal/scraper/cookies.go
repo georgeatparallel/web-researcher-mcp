@@ -49,6 +49,7 @@ func newCookieJar(cookies []cookievault.Cookie, now time.Time) (*cookiejar.Jar, 
 		if host == "" {
 			continue
 		}
+		// #nosec G124 -- replays a cookie the site itself set; Secure/HttpOnly are copied as recorded and the jar enforces Secure per request, so forcing flags would break plain-http sites
 		hc := &http.Cookie{
 			Name:     c.Name,
 			Value:    c.Value,
