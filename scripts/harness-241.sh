@@ -48,8 +48,8 @@ run_named_tests() {
   local pattern="^($(echo "$names" | tr ' ' '|'))\$"
   local log
   log="$(mktemp)"
-  go test "${flags[@]}" "$pkg" -run "$pattern" -v -count=1 >"$log" 2>&1
-  local rc=$?
+  local rc=0
+  go test "${flags[@]}" "$pkg" -run "$pattern" -v -count=1 >"$log" 2>&1 || rc=$?
   cat "$log"
   local missing=0 t
   for t in $names; do
@@ -61,6 +61,8 @@ run_named_tests() {
   rm -f "$log"
   [ "$rc" -eq 0 ] && [ "$missing" -eq 0 ]
 }
+
+export -f run_named_tests
 
 NEW_FILES="internal/cookievault/cookievault.go internal/cookievault/capture.go internal/tools/site_session.go internal/scraper/cookies.go"
 
@@ -89,7 +91,6 @@ run_gate "SAST (gosec) + pattern checks (rules S5/S7/S14/C2)" \
 run_gate "Multi-instance isolation (rules I1, I4)" \
   "$OUT_DIR/241-03-isolation.log" \
   bash -c '
-    '"$(declare -f run_named_tests)"'
     set -e
     run_named_tests -race -- ./internal/cookievault/ "TestMultiInstanceCookieVault TestMultiInstanceCapturer"
     run_named_tests -race -- ./internal/scraper/ "TestMultiInstancePipelineCookieIsolation"
@@ -102,7 +103,6 @@ run_gate "Dead-code scan (go vet)" \
 run_gate "Unit/integration tests (rules I2-I4, S1-S15, R1-R2, P1-P2, C3)" \
   "$OUT_DIR/241-05-unit.log" \
   bash -c '
-    '"$(declare -f run_named_tests)"'
     set -e
     run_named_tests -race -- ./internal/cookievault/ "TestVaultKeyCollisionFree TestVaultTenantUserIsolation TestRegistrableDomain TestVaultRefusesInvalidDomains TestCookieOutsideVaultDomainDropped TestBundleTTLCap TestVaultFilesAreEncrypted TestVaultDataSubjectRoundTrip TestBundleCaps TestCaptureProfileDirRemovedOnEveryPath TestCaptureSemaphoreBound TestCaptureTimeoutAndCancel TestConstructionLaunchesNoBrowser"
     run_named_tests -race -- ./internal/scraper/ "TestSecureCookieNotSentOverHTTP TestHostOnlyVsDomainCookie TestRedirectToOtherHostDoesNotLeakCookie TestSSRFBlocksBeforeCookieSend TestResolveAndValidateHost TestBrowserValidatesBeforeSetCookies TestBrowserVaultScrapeUsesFreshIncognito TestConcurrentScrapesDoNotShareCookies TestVaultBackedSkipsCloudProxyTiers TestSessionCookieStaysSession TestExpiredCookiesDropped"
@@ -115,7 +115,6 @@ run_gate "Unit/integration tests (rules I2-I4, S1-S15, R1-R2, P1-P2, C3)" \
 run_gate "E2E (real binary, vault-backed scrape + logout, recorded proof)" \
   "$OUT_DIR/241-06-e2e.log" \
   bash -c '
-    '"$(declare -f run_named_tests)"'
     set -e
     run_named_tests -tags=e2e -- ./tests/e2e/ "TestSiteLogin241_E2E"
   '
