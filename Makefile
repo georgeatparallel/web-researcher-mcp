@@ -243,6 +243,12 @@ harness-467:
 harness-21:
 	bash scripts/harness-21.sh
 
+# Permanent regression gate for site_login / site_logout + the cookie vault
+# (#241). Not part of `verify`; run manually before releasing changes to the
+# cookie vault, cookie injection in the scraper, or the consent bootstrap.
+harness-241:
+	bash scripts/harness-241.sh
+
 clean:
 	rm -f $(BINARY) coverage.out coverage.html
 
