@@ -168,3 +168,51 @@ func TestSiteLogin241_E2E(t *testing.T) {
 		}
 	}
 }
+
+// TestSiteLoginStdioConsentOptIn_E2E proves the STDIO consent opt-in end to end
+// with the real binary and no seeded consent. site_login is aimed at
+// localtest.me (a registrable domain that resolves to loopback), which the
+// capturer rejects before opening any browser: "blocked" means the consent
+// gate passed, "no_consent" means it did not.
+func TestSiteLoginStdioConsentOptIn_E2E(t *testing.T) {
+	cases := []struct {
+		name, optIn, want string
+	}{
+		{"default grants nothing", "", "no_consent"},
+		{"explicit opt-in grants session_capture", "true", "blocked"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := []string{
+				"COOKIE_VAULT_ENABLED=true",
+				"COOKIE_VAULT_ENCRYPTION_KEY=" + e2eVaultKey,
+				"CACHE_ENCRYPTION_KEY=" + e2eCacheKey,
+				"CACHE_DIR=" + t.TempDir(),
+				"STDIO_USER_ID=optin",
+				"GOOGLE_CUSTOM_SEARCH_API_KEY=test",
+				"GOOGLE_CUSTOM_SEARCH_ID=test",
+			}
+			if tc.optIn != "" {
+				env = append(env, "COOKIE_VAULT_STDIO_CONSENT="+tc.optIn)
+			}
+			h := newProviderHarness(t, env)
+			defer h.shutdown()
+			h.initialize(t)
+
+			raw := h.callTool(t, "site_login", map[string]any{"url": "http://localtest.me/login"})
+			var res struct {
+				Content []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			}
+			if err := json.Unmarshal(raw, &res); err != nil || len(res.Content) == 0 {
+				t.Fatalf("bad result %v raw=%s", err, raw)
+			}
+			var out map[string]any
+			_ = json.Unmarshal([]byte(res.Content[0].Text), &out)
+			if out["status"] != tc.want {
+				t.Fatalf("site_login status = %v, want %s (raw: %.300s)", out["status"], tc.want, res.Content[0].Text)
+			}
+		})
+	}
+}
