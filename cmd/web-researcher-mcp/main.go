@@ -933,12 +933,13 @@ func completionProviderNames(deps tools.Dependencies) []string {
 // grantStdioConsent pre-grants consent, only when no record exists, for the
 // per-user features the STDIO operator enabled. consent.GrantIfAbsent never
 // resurrects a withdrawn consent. Workspace and session_capture are never
-// granted here: workspace is host-owned, and session_capture stores the user's
-// website logins, so it needs an explicit act by the user (#241).
+// granted here: workspace is host-owned. session_capture stores the user's
+// website logins, so it is granted only when the operator sets
+// COOKIE_VAULT_STDIO_CONSENT=true, an explicit opt-in (#241).
 func grantStdioConsent(ctx context.Context, cfg *config.Config, mgr consent.Manager, aud audit.Auditor, logger *slog.Logger) {
-	grant := func(p consent.Purpose) {
+	grant := func(p consent.Purpose, source string) {
 		wrote, err := consent.GrantIfAbsent(ctx, mgr, "default", cfg.StdioUserID, p,
-			"stdio_bootstrap", time.Now().UTC().Format(time.RFC3339))
+			source, time.Now().UTC().Format(time.RFC3339))
 		if err != nil {
 			logger.Warn("stdio consent auto-grant failed", "user", cfg.StdioUserID, "purpose", string(p), "err", err)
 			return
@@ -947,17 +948,20 @@ func grantStdioConsent(ctx context.Context, cfg *config.Config, mgr consent.Mana
 			return
 		}
 		ev := audit.NewEvent(consent.EventGrant, "default", cfg.StdioUserID)
-		ev.Metadata = map[string]any{"purpose": string(p), "granted": true, "source": "stdio_bootstrap"}
+		ev.Metadata = map[string]any{"purpose": string(p), "granted": true, "source": source}
 		aud.Log(ev)
 		logger.Info("stdio consent auto-granted", "user", cfg.StdioUserID, "purpose", string(p))
 	}
 	if cfg.Features.Memory {
-		grant(consent.PurposeMemory)
+		grant(consent.PurposeMemory, "stdio_bootstrap")
 	}
 	if cfg.Features.UserAnalytics {
-		grant(consent.PurposeAnalytics)
+		grant(consent.PurposeAnalytics, "stdio_bootstrap")
 	}
 	if cfg.Features.Monitoring {
-		grant(consent.PurposeMonitoring)
+		grant(consent.PurposeMonitoring, "stdio_bootstrap")
+	}
+	if cfg.Features.CookieVault && cfg.CookieVaultStdioConsent {
+		grant(consent.PurposeSessionCapture, "stdio_env_optin")
 	}
 }

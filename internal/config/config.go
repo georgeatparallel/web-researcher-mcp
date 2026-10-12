@@ -27,10 +27,14 @@ type Config struct {
 	CacheEncryptionKeyPrev string
 	// Cookie vault (#241). Only meaningful when Features.CookieVault is true; Load
 	// validates the key (64 hex, distinct from the cache keys) and the bounds.
-	CookieVaultKey                string
-	CookieVaultTTL                time.Duration // max lifetime of any stored cookie bundle
-	MaxConcurrentCaptures         int           // simultaneous headed login captures
-	CookieCaptureTimeout          time.Duration // how long a site_login window may stay open
+	CookieVaultKey        string
+	CookieVaultTTL        time.Duration // max lifetime of any stored cookie bundle
+	MaxConcurrentCaptures int           // simultaneous headed login captures
+	CookieCaptureTimeout  time.Duration // how long a site_login window may stay open
+	// CookieVaultStdioConsent is the operator's explicit opt-in to record the
+	// session_capture consent for STDIO_USER_ID at startup (COOKIE_VAULT_STDIO_CONSENT).
+	// Honored only with the vault enabled, in STDIO mode, with a valid STDIO_USER_ID.
+	CookieVaultStdioConsent       bool
 	CacheIsolation                string
 	RedisURL                      string
 	RateLimit                     RateLimitConfig
@@ -481,6 +485,16 @@ func Load() (*Config, error) {
 		}
 	}
 
+	// COOKIE_VAULT_STDIO_CONSENT (#241): explicit operator opt-in to grant the
+	// session_capture consent to STDIO_USER_ID at startup. STDIO has no consent
+	// endpoint and cannot ask mid-request, so this is the only way to grant it.
+	// Never defaulted on; ignored (with a warning) unless it can take effect.
+	cookieVaultStdioConsent := envBool("COOKIE_VAULT_STDIO_CONSENT", false)
+	if cookieVaultStdioConsent && (!cookieVaultEnabled || stdioUserID == "") {
+		warnings = append(warnings, "COOKIE_VAULT_STDIO_CONSENT is ignored: it needs COOKIE_VAULT_ENABLED=true, STDIO mode (no PORT) and a valid STDIO_USER_ID.")
+		cookieVaultStdioConsent = false
+	}
+
 	// AUDIT_RETENTION_DAYS: 0 disables cleanup; any other value is clamped to
 	// [180,3650] per NIS2/HGB retention floors.
 	retentionDays := envInt("AUDIT_RETENTION_DAYS", 180)
@@ -565,16 +579,17 @@ func Load() (*Config, error) {
 			ReferrerPolicy:    envOrDefault("HTTP_REFERRER_POLICY", "no-referrer"),
 			PermissionsPolicy: envOrDefault("HTTP_PERMISSIONS_POLICY", "geolocation=(), camera=(), microphone=()"),
 		},
-		CacheDir:               envOrDefault("CACHE_DIR", defaultCacheDir()),
-		CacheMaxMemoryMB:       envInt("CACHE_MAX_MEMORY_MB", 64),
-		CacheEncryptionKey:     encKey,
-		CacheEncryptionKeyPrev: encKeyPrev,
-		CookieVaultKey:         cookieVaultKey,
-		CookieVaultTTL:         cookieVaultTTL,
-		MaxConcurrentCaptures:  maxCaptures,
-		CookieCaptureTimeout:   captureTimeout,
-		CacheIsolation:         envOrDefault("CACHE_ISOLATION", "shared"),
-		RedisURL:               os.Getenv("REDIS_URL"),
+		CacheDir:                envOrDefault("CACHE_DIR", defaultCacheDir()),
+		CacheMaxMemoryMB:        envInt("CACHE_MAX_MEMORY_MB", 64),
+		CacheEncryptionKey:      encKey,
+		CacheEncryptionKeyPrev:  encKeyPrev,
+		CookieVaultKey:          cookieVaultKey,
+		CookieVaultTTL:          cookieVaultTTL,
+		MaxConcurrentCaptures:   maxCaptures,
+		CookieCaptureTimeout:    captureTimeout,
+		CookieVaultStdioConsent: cookieVaultStdioConsent,
+		CacheIsolation:          envOrDefault("CACHE_ISOLATION", "shared"),
+		RedisURL:                os.Getenv("REDIS_URL"),
 		RateLimit: RateLimitConfig{
 			PerTenant:      envInt("RATE_LIMIT_PER_TENANT", 120),
 			Global:         envInt("RATE_LIMIT_GLOBAL", 1000),

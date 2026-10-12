@@ -26,29 +26,67 @@ func TestOsintClientDedicatedTimeout(t *testing.T) {
 	}
 }
 
-// TestStdioBootstrapNeverGrantsSessionCapture proves the STDIO startup grant
-// covers the other opt-in purposes but never session_capture or workspace (#241).
-func TestStdioBootstrapNeverGrantsSessionCapture(t *testing.T) {
-	cfg := &config.Config{StdioUserID: "alice"}
-	cfg.Features.CookieVault = true
-	cfg.Features.Memory = true
-	cfg.Features.UserAnalytics = true
-	cfg.Features.Monitoring = true
-	cfg.Features.Workspaces = true
-	mgr := consent.NewStoreManager(persist.NewMemoryStore())
-
-	grantStdioConsent(context.Background(), cfg, mgr, audit.NewNoop(), slog.Default())
-
-	for _, p := range []consent.Purpose{consent.PurposeMemory, consent.PurposeAnalytics, consent.PurposeMonitoring} {
-		if !granted(mgr, p) {
-			t.Errorf("purpose %q should be auto-granted", p)
-		}
+// TestStdioBootstrapSessionCaptureNeedsExplicitOptIn proves the STDIO startup
+// grant covers memory, analytics and monitoring, never workspace, and records
+// session_capture only on the explicit COOKIE_VAULT_STDIO_CONSENT opt-in (#241).
+func TestStdioBootstrapSessionCaptureNeedsExplicitOptIn(t *testing.T) {
+	newCfg := func(vault, optIn bool) *config.Config {
+		cfg := &config.Config{StdioUserID: "alice", CookieVaultStdioConsent: optIn}
+		cfg.Features.CookieVault = vault
+		cfg.Features.Memory = true
+		cfg.Features.UserAnalytics = true
+		cfg.Features.Monitoring = true
+		cfg.Features.Workspaces = true
+		return cfg
 	}
-	for _, p := range []consent.Purpose{consent.PurposeSessionCapture, consent.PurposeWorkspace} {
-		if granted(mgr, p) {
-			t.Errorf("purpose %q must never be auto-granted", p)
-		}
+	run := func(cfg *config.Config) consent.Manager {
+		mgr := consent.NewStoreManager(persist.NewMemoryStore())
+		grantStdioConsent(context.Background(), cfg, mgr, audit.NewNoop(), slog.Default())
+		return mgr
 	}
+
+	t.Run("default never grants session_capture or workspace", func(t *testing.T) {
+		mgr := run(newCfg(true, false))
+		for _, p := range []consent.Purpose{consent.PurposeMemory, consent.PurposeAnalytics, consent.PurposeMonitoring} {
+			if !granted(mgr, p) {
+				t.Errorf("purpose %q should be auto-granted", p)
+			}
+		}
+		for _, p := range []consent.Purpose{consent.PurposeSessionCapture, consent.PurposeWorkspace} {
+			if granted(mgr, p) {
+				t.Errorf("purpose %q must not be granted without opt-in", p)
+			}
+		}
+	})
+
+	t.Run("opt-in grants session_capture, still never workspace", func(t *testing.T) {
+		mgr := run(newCfg(true, true))
+		if !granted(mgr, consent.PurposeSessionCapture) {
+			t.Fatal("session_capture should be granted on explicit opt-in")
+		}
+		if granted(mgr, consent.PurposeWorkspace) {
+			t.Fatal("workspace must never be auto-granted")
+		}
+	})
+
+	t.Run("opt-in without the vault grants nothing", func(t *testing.T) {
+		if granted(run(newCfg(false, true)), consent.PurposeSessionCapture) {
+			t.Fatal("session_capture granted although the vault is disabled")
+		}
+	})
+
+	t.Run("a withdrawal is never resurrected", func(t *testing.T) {
+		mgr := consent.NewStoreManager(persist.NewMemoryStore())
+		rec := consent.Record{TenantID: "default", UserID: "alice", Purpose: consent.PurposeSessionCapture,
+			Granted: false, DecidedAt: time.Now().UTC().Format(time.RFC3339), DecidedFrom: "test"}
+		if err := mgr.Record(context.Background(), rec); err != nil {
+			t.Fatal(err)
+		}
+		grantStdioConsent(context.Background(), newCfg(true, true), mgr, audit.NewNoop(), slog.Default())
+		if granted(mgr, consent.PurposeSessionCapture) {
+			t.Fatal("restart re-granted a withdrawn session_capture consent")
+		}
+	})
 }
 
 func granted(mgr consent.Manager, p consent.Purpose) bool {

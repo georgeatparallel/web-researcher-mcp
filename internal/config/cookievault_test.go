@@ -68,3 +68,46 @@ func TestConfigCookieVaultKeyValidation(t *testing.T) {
 		}
 	})
 }
+
+// TestConfigCookieVaultStdioConsent pins the STDIO consent opt-in (#241): off by
+// default, and honored only with the vault on, a valid STDIO_USER_ID and no PORT.
+func TestConfigCookieVaultStdioConsent(t *testing.T) {
+	base := map[string]string{"COOKIE_VAULT_ENABLED": "true", "COOKIE_VAULT_ENCRYPTION_KEY": vaultKeyA, "STDIO_USER_ID": "alice"}
+	with := func(extra map[string]string) map[string]string {
+		m := map[string]string{}
+		for k, v := range base {
+			m[k] = v
+		}
+		for k, v := range extra {
+			m[k] = v
+		}
+		return m
+	}
+	cases := []struct {
+		name     string
+		env      map[string]string
+		want     bool
+		wantWarn bool
+	}{
+		{"default off", with(nil), false, false},
+		{"explicit opt-in", with(map[string]string{"COOKIE_VAULT_STDIO_CONSENT": "true"}), true, false},
+		{"vault disabled", with(map[string]string{"COOKIE_VAULT_ENABLED": "false", "COOKIE_VAULT_STDIO_CONSENT": "true"}), false, true},
+		{"no stdio user", with(map[string]string{"STDIO_USER_ID": "", "COOKIE_VAULT_STDIO_CONSENT": "true"}), false, true},
+		{"http mode", with(map[string]string{"PORT": "8080", "COOKIE_VAULT_STDIO_CONSENT": "true"}), false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.CookieVaultStdioConsent != tc.want {
+				t.Fatalf("CookieVaultStdioConsent = %v, want %v", cfg.CookieVaultStdioConsent, tc.want)
+			}
+		})
+	}
+}

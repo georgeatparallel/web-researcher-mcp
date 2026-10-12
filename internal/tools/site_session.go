@@ -69,7 +69,7 @@ func registerSiteLogin(srv *mcp.Server, deps Dependencies) {
 			"Only the resulting cookies are saved, never your password. Cookies are stored encrypted, scoped to that site's registrable domain, " +
 			"sent only to that site by scrape_page, expire on a short default TTL, and can be removed any time with site_logout or the data-subject erasure endpoint. " +
 			"Blocks until you close the window or the capture timeout passes (then nothing is saved). " +
-			"Opt-in and consent-gated: requires the 'session_capture' consent purpose, which is never granted automatically. " +
+			"Opt-in and consent-gated: requires the 'session_capture' consent purpose, which is never granted by default (the operator must opt in explicitly). " +
 			"Use only on accounts and sites whose terms of service allow automated access on your behalf; you are responsible for that.",
 		Annotations:  writeAnnotations(false),
 		OutputSchema: siteLoginOutputSchema,
@@ -86,7 +86,7 @@ func registerSiteLogin(srv *mcp.Server, deps Dependencies) {
 		}
 		if deps.Consent == nil || !deps.Consent.HasConsent(ctx, consent.PurposeSessionCapture) {
 			auditToolDenial(ctx, deps, "site_login", time.Since(start), "no_consent")
-			return structuredResult(mustJSON(map[string]any{"status": "no_consent", "reason": "no recorded consent for the 'session_capture' purpose; nothing is captured"})), nil, nil
+			return structuredResult(mustJSON(map[string]any{"status": "no_consent", "reason": "no recorded consent for the 'session_capture' purpose; nothing is captured. In STDIO the operator grants it by setting COOKIE_VAULT_STDIO_CONSENT=true"})), nil, nil
 		}
 
 		domain, cookies, err := deps.CookieCapturer.Capture(ctx, input.URL)

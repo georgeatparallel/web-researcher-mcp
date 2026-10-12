@@ -2030,7 +2030,7 @@ type SiteLoginOutput struct {
 
 ### Behavior
 
-Requires an identified user and recorded consent for the `session_capture` purpose, which is never granted automatically; otherwise returns `unavailable` / `no_consent` and opens no browser. The host is checked for SSRF before the browser launches. The call blocks until you close the window or `COOKIE_CAPTURE_TIMEOUT` passes (`timeout`: nothing is saved). At most `MAX_CONCURRENT_CAPTURES` windows run at once (`busy`). The browser profile is a temporary directory deleted on every exit path. Cookies are stored AES-256-GCM encrypted per (tenant, user, registrable domain), replace any earlier login for that domain, and are included in data-subject export (counts only) and erasure.
+Requires an identified user and recorded consent for the `session_capture` purpose, which is never granted by default (HTTP: host asserts it via `POST /admin/consent`; STDIO: the operator sets `COOKIE_VAULT_STDIO_CONSENT=true`); otherwise returns `unavailable` / `no_consent` and opens no browser. The host is checked for SSRF before the browser launches. The call blocks until you close the window or `COOKIE_CAPTURE_TIMEOUT` passes (`timeout`: nothing is saved). At most `MAX_CONCURRENT_CAPTURES` windows run at once (`busy`). The browser profile is a temporary directory deleted on every exit path. Cookies are stored AES-256-GCM encrypted per (tenant, user, registrable domain), replace any earlier login for that domain, and are included in data-subject export (counts only) and erasure.
 
 ### Cache
 

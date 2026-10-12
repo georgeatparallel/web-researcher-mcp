@@ -108,7 +108,7 @@ run_gate "Unit/integration tests (rules I2-I4, S1-S15, R1-R2, P1-P2, C3)" \
     run_named_tests -race -- ./internal/scraper/ "TestSecureCookieNotSentOverHTTP TestHostOnlyVsDomainCookie TestRedirectToOtherHostDoesNotLeakCookie TestSSRFBlocksBeforeCookieSend TestResolveAndValidateHost TestBrowserValidatesBeforeSetCookies TestBrowserVaultScrapeUsesFreshIncognito TestConcurrentScrapesDoNotShareCookies TestVaultBackedSkipsCloudProxyTiers TestSessionCookieStaysSession TestExpiredCookiesDropped"
     run_named_tests -race -- ./internal/tools/ "TestVaultBackedScrapeBypassesCache TestAnonymousAfterAuthenticatedNeverServedFromCache TestCanaryCookieNeverLeaks TestSiteLoginRequiresConsent TestScrapeSkipsVaultWithoutConsent TestSiteLoginNotRegisteredWithoutCapturer TestSiteLogoutDeletesAndIsIdempotent TestSiteLogoutLeavesNoCacheEntries TestSiteLoginRejectsBadURLs TestSiteLoginDescriptionDisclosesToS TestNoVaultReadWhenDisabled TestCorruptVaultEntryDegradesToAnonymous TestToolsDocMatchesRegistry TestAllToolsHaveAnnotations"
     run_named_tests -race -- ./internal/config/ "TestConfigCookieVaultKeyValidation"
-    run_named_tests -race -- ./cmd/web-researcher-mcp/ "TestStdioBootstrapNeverGrantsSessionCapture"
+    run_named_tests -race -- ./cmd/web-researcher-mcp/ "TestStdioBootstrapSessionCaptureNeedsExplicitOptIn"
     make check-python-drift
   '
 
