@@ -2014,6 +2014,8 @@ class ScrapePageResponse:
     forumSignals: Optional[ForumSignals] = None
     githubTrustSignals: Optional[GithubTrustSignals] = None
     highlights: list[ScrapePageHighlight] = field(default_factory=list)
+    loginHint: Optional[str] = None
+    loginRequired: Optional[bool] = None
     metadata: Optional[ScrapePageMetadata] = None
     raw: Optional[bool] = None
     retractionStatus: Optional[Any] = None
@@ -2046,6 +2048,8 @@ class ScrapePageResponse:
             forumSignals=ForumSignals.from_dict(d.get('forumSignals')) if d.get('forumSignals') else None,
             githubTrustSignals=GithubTrustSignals.from_dict(d.get('githubTrustSignals')) if d.get('githubTrustSignals') else None,
             highlights=[ScrapePageHighlight.from_dict(i) for i in (d.get('highlights') or [])],
+            loginHint=d.get('loginHint'),
+            loginRequired=d.get('loginRequired'),
             metadata=ScrapePageMetadata.from_dict(d.get('metadata')) if d.get('metadata') else None,
             raw=d.get('raw'),
             retractionStatus=d.get('retractionStatus') or None,

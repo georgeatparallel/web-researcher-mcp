@@ -111,7 +111,7 @@ func registerScrapePage(srv *mcp.Server, deps Dependencies) {
 			if neg := negCacheLookup(ctx, deps, input.URL); neg != nil {
 				recordToolCall(deps, "scrape_page", time.Since(start), neg, "upstream_error", true)
 				auditToolCall(ctx, deps, "scrape_page", time.Since(start), neg, "upstream_error")
-				return scrapeErrorResponse(neg, input.URL), nil, nil
+				return scrapeErrorResponseHint(neg, input.URL, loginHintFor(deps, authed, input.URL)), nil, nil
 			}
 		}
 
@@ -124,7 +124,7 @@ func registerScrapePage(srv *mcp.Server, deps Dependencies) {
 				writeNegCache(ctx, deps, input.URL, se)
 			}
 			trackScrapeOutcome(ctx, deps, input.SessionID, input.URL, err)
-			return scrapeErrorResponse(err, input.URL), nil, nil
+			return scrapeErrorResponseHint(err, input.URL, loginHintFor(deps, authed, input.URL)), nil, nil
 		}
 
 		processedContent, truncated := deps.Content.Process(result.Content, maxLength)
@@ -166,6 +166,12 @@ func registerScrapePage(srv *mcp.Server, deps Dependencies) {
 		// at once. wordCount is always emitted; sparsityWarning is omitted
 		// (zero-value "") when content is not thin.
 		output["wordCount"] = result.WordCount
+		// Login-wall signal: the page is probably a sign-in page, not the content.
+		// With saved cookies it means the login expired; without, that none exists.
+		if hint := loginHintFor(deps, authed, input.URL); hint != "" && looksLikeLoginWall(input.URL, result.Title, processedContent, result.WordCount) {
+			output["loginRequired"] = true
+			output["loginHint"] = hint
+		}
 		if result.SparsityWarning != "" {
 			output["sparsityWarning"] = result.SparsityWarning
 		}
@@ -311,7 +317,7 @@ func scrapeRaw(ctx context.Context, deps Dependencies, input scrapePageInput, ma
 	if neg := negCacheLookup(ctx, deps, input.URL); neg != nil && neg.Kind != scraper.ErrContent && !authed {
 		recordToolCall(deps, "scrape_page", time.Since(start), neg, "upstream_error", true)
 		auditToolCall(ctx, deps, "scrape_page", time.Since(start), neg, "upstream_error")
-		return scrapeErrorResponse(neg, input.URL), nil, nil
+		return scrapeErrorResponseHint(neg, input.URL, loginHintFor(deps, authed, input.URL)), nil, nil
 	}
 
 	result, err := deps.Scraper.ScrapeRaw(ctx, input.URL, maxLength)
@@ -323,7 +329,7 @@ func scrapeRaw(ctx context.Context, deps Dependencies, input scrapePageInput, ma
 			writeNegCache(ctx, deps, input.URL, se)
 		}
 		trackScrapeOutcome(ctx, deps, input.SessionID, input.URL, err)
-		return scrapeErrorResponse(err, input.URL), nil, nil
+		return scrapeErrorResponseHint(err, input.URL, loginHintFor(deps, authed, input.URL)), nil, nil
 	}
 
 	contentLen := len(result.Content)
@@ -507,6 +513,12 @@ func negCacheTTL(kind scraper.ErrorKind) time.Duration {
 }
 
 func scrapeErrorResponse(err error, url string) *mcp.CallToolResult {
+	return scrapeErrorResponseHint(err, url, "")
+}
+
+// scrapeErrorResponseHint is scrapeErrorResponse plus loginHint, appended to an
+// auth-required error so the caller learns to run site_login.
+func scrapeErrorResponseHint(err error, url, loginHint string) *mcp.CallToolResult {
 	var se *scraper.ScrapeError
 	if !errors.As(err, &se) {
 		return structuredError(
@@ -536,6 +548,9 @@ func scrapeErrorResponse(err error, url string) *mcp.CallToolResult {
 		msg = fmt.Sprintf("Not found: %s does not exist (404/410, or the domain could not be resolved). Check the URL.", url)
 	case scraper.ErrAuth:
 		msg = fmt.Sprintf("Auth required: %s is behind a login wall.", url)
+		if loginHint != "" {
+			msg += " " + loginHint
+		}
 	case scraper.ErrRateLimit:
 		msg = fmt.Sprintf("Rate limited on %s. Retry in 60 seconds.", url)
 	case scraper.ErrNetwork:
