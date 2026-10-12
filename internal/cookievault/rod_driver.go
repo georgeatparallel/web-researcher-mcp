@@ -18,9 +18,26 @@ type RodDriver struct {
 	headless   bool // tests only; production login must be visible
 }
 
-// NewRodDriver returns a headed Driver. An empty chromePath lets rod find Chrome.
+// lookPath finds an installed browser; a variable so tests can stub it.
+var lookPath = launcher.LookPath
+
+// NewRodDriver returns a headed Driver. An empty chromePath uses the
+// browser already installed on the machine (Chrome first), so the user signs
+// in with the browser they know. Only when none is installed does rod download
+// its own Chromium.
 func NewRodDriver(chromePath string) *RodDriver {
 	return &RodDriver{chromePath: chromePath}
+}
+
+// browserBin returns the explicit path, else the installed browser, else "".
+func (d *RodDriver) browserBin() string {
+	if d.chromePath != "" {
+		return d.chromePath
+	}
+	if bin, ok := lookPath(); ok {
+		return bin
+	}
+	return ""
 }
 
 // Open launches Chromium on profileDir and navigates to loginURL.
@@ -31,8 +48,8 @@ func (d *RodDriver) Open(ctx context.Context, loginURL, profileDir string) (Sess
 		Set("no-first-run").
 		Delete("enable-automation").
 		Set("disable-blink-features", "AutomationControlled")
-	if d.chromePath != "" {
-		l = l.Bin(d.chromePath)
+	if bin := d.browserBin(); bin != "" {
+		l = l.Bin(bin)
 	}
 	if d.headless {
 		l = l.Set("no-sandbox").Set("disable-gpu")
@@ -86,24 +103,7 @@ func (s *rodSession) Cookies(ctx context.Context) ([]Cookie, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Cookie, 0, len(raw))
-	for _, c := range raw {
-		ck := Cookie{
-			Name:     c.Name,
-			Value:    c.Value,
-			Domain:   c.Domain,
-			Path:     c.Path,
-			Secure:   c.Secure,
-			HTTPOnly: c.HTTPOnly,
-			HostOnly: len(c.Domain) > 0 && c.Domain[0] != '.',
-			SameSite: string(c.SameSite),
-		}
-		if !c.Session && c.Expires > 0 {
-			ck.Expires = c.Expires.Time()
-		}
-		out = append(out, ck)
-	}
-	return out, nil
+	return fromRodCookies(raw), nil
 }
 
 func (s *rodSession) Close() error {
