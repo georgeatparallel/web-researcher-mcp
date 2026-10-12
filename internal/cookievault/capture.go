@@ -23,6 +23,17 @@ var (
 
 const capturePollInterval = 500 * time.Millisecond
 
+// Source says where captured cookies came from.
+type Source string
+
+// Capture sources.
+const (
+	// SourceBrowser: read from the user's own running browser via an Attacher.
+	SourceBrowser Source = "browser"
+	// SourceLoginWindow: the user signed in inside a fresh login window.
+	SourceLoginWindow Source = "login_window"
+)
+
 // Driver opens a visible browser for a human to log in. It never launches a
 // browser until Open is called.
 type Driver interface {
@@ -52,6 +63,14 @@ type Capturer struct {
 	slots    chan struct{}
 	timeout  time.Duration
 	poll     time.Duration
+	attacher Attacher
+}
+
+// WithAttacher makes Capture try the user's own running browser before opening
+// a login window. A nil attacher disables that step.
+func (c *Capturer) WithAttacher(a Attacher) *Capturer {
+	c.attacher = a
+	return c
 }
 
 // NewCapturer returns a Capturer allowing at most maxConcurrent sessions, each
@@ -69,22 +88,39 @@ func NewCapturer(driver Driver, validate HostValidator, maxConcurrent int, timeo
 	}
 }
 
-// Capture opens loginURL in a visible browser and returns the registrable
-// domain and its cookies once the user closes the window. The browser profile
-// is a fresh temp directory removed on every exit path. Nothing is stored here:
-// on timeout or cancellation the caller gets an error and no cookies.
+// Capture is CaptureWithSource without the source.
 func (c *Capturer) Capture(ctx context.Context, loginURL string) (string, []Cookie, error) {
+	domain, cookies, _, err := c.CaptureWithSource(ctx, loginURL)
+	return domain, cookies, err
+}
+
+// CaptureWithSource returns the registrable domain of loginURL and its cookies.
+// With an Attacher it first reads them from the user's own signed-in browser.
+// If that is unavailable or holds none for the domain, it opens loginURL in a
+// visible browser and returns the cookies once the user closes the window. The
+// window's profile is a fresh temp directory removed on every exit path. Nothing
+// is stored here: on timeout or cancellation the caller gets an error and no
+// cookies.
+func (c *Capturer) CaptureWithSource(ctx context.Context, loginURL string) (string, []Cookie, Source, error) {
+	domain, cookies, src, err := c.capture(ctx, loginURL)
+	if err != nil {
+		return "", nil, "", err
+	}
+	return domain, cookies, src, nil
+}
+
+func (c *Capturer) capture(ctx context.Context, loginURL string) (string, []Cookie, Source, error) {
 	u, err := url.Parse(loginURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
-		return "", nil, ErrInvalidLoginURL
+		return "", nil, "", ErrInvalidLoginURL
 	}
 	domain := RegistrableDomain(u.Hostname())
 	if domain == "" {
-		return "", nil, ErrInvalidLoginURL
+		return "", nil, "", ErrInvalidLoginURL
 	}
 	if c.validate != nil {
 		if err := c.validate(ctx, u.Hostname()); err != nil {
-			return "", nil, fmt.Errorf("%w: %w", ErrLoginURLRejected, err)
+			return "", nil, "", fmt.Errorf("%w: %w", ErrLoginURLRejected, err)
 		}
 	}
 
@@ -92,12 +128,23 @@ func (c *Capturer) Capture(ctx context.Context, loginURL string) (string, []Cook
 	case c.slots <- struct{}{}:
 		defer func() { <-c.slots }()
 	default:
-		return "", nil, ErrCaptureBusy
+		return "", nil, "", ErrCaptureBusy
+	}
+
+	if c.attacher != nil {
+		// Any failure (no browser, debugging off, prompt declined, no cookies for
+		// this site) falls through to the login window.
+		if cookies, err := c.attacher.Attach(ctx, domain); err == nil && len(cookies) > 0 {
+			return domain, cookies, SourceBrowser, nil
+		}
+		if ctx.Err() != nil {
+			return "", nil, "", ctx.Err()
+		}
 	}
 
 	profileDir, err := os.MkdirTemp("", "wrmcp-login-*")
 	if err != nil {
-		return "", nil, fmt.Errorf("create login profile: %w", err)
+		return "", nil, "", fmt.Errorf("create login profile: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(profileDir) }()
 
@@ -106,7 +153,7 @@ func (c *Capturer) Capture(ctx context.Context, loginURL string) (string, []Cook
 
 	sess, err := c.driver.Open(ctx, u.String(), profileDir)
 	if err != nil {
-		return "", nil, fmt.Errorf("open login browser: %w", err)
+		return "", nil, "", fmt.Errorf("open login browser: %w", err)
 	}
 	var closeOnce sync.Once
 	closeSession := func() { closeOnce.Do(func() { _ = sess.Close() }) }
@@ -126,16 +173,16 @@ func (c *Capturer) Capture(ctx context.Context, loginURL string) (string, []Cook
 			snapshot()
 			cookies := FilterToDomain(last, domain, time.Now())
 			if len(cookies) == 0 {
-				return "", nil, ErrNothingCaptured
+				return "", nil, "", ErrNothingCaptured
 			}
-			return domain, cookies, nil
+			return domain, cookies, SourceLoginWindow, nil
 		case <-ticker.C:
 			snapshot()
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return "", nil, ErrCaptureTimeout
+				return "", nil, "", ErrCaptureTimeout
 			}
-			return "", nil, ctx.Err()
+			return "", nil, "", ctx.Err()
 		}
 	}
 }

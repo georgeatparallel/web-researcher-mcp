@@ -146,7 +146,7 @@ type ScrapeOutput struct {
     SizeCategory    string    `json:"sizeCategory"`   // small, medium, large, very_large
     Citation        *Citation `json:"citation"`       // always present
     Raw             bool      `json:"raw,omitempty"`  // true only in raw mode; omitted otherwise
-    Authenticated   bool      `json:"authenticated,omitempty"` // true only when saved site_login cookies were sent (#241); such results are never cached
+    Authenticated   bool      `json:"authenticated,omitempty"` // true only when saved site_login cookies were sent (#241), which does not prove the session is still signed in; such results are never cached
     ExtractedBy     string    `json:"extractedBy,omitempty"` // extraction tier: markdown|stealth|jina|html|browser|exa:cached|exa:crawled; omitted when unknown
     ExtractionQuality string  `json:"extractionQuality,omitempty"` // complete when the pipeline returned a confident extraction; partial when every tier was exhausted and the best-quality candidate was returned instead. Never an error. Omitted in raw mode.
     WordCount         int     `json:"wordCount,omitempty"`         // words in the extracted content (#358); orthogonal to ExtractionQuality — a "complete" extraction can still be a thin paywall/bot-wall stub. Omitted in raw mode.
@@ -2007,7 +2007,7 @@ Requires an authenticated user and recorded consent for the `monitoring` purpose
 
 ### Purpose
 
-Let you sign in to a website by hand so `scrape_page` can read pages behind that login. A visible browser window opens on the URL. You log in (2FA and CAPTCHA included) and close the window. Only the resulting cookies are saved, never your password. Use it only on sites whose terms of service allow automated access on your behalf.
+Let `scrape_page` read pages behind your login. It first tries your own running Chrome, Edge or Brave and reads only that site's cookies from your existing session. If that is unavailable, or you are not signed in there, a visible window opens on the URL. You log in by hand (2FA and CAPTCHA included) and close the window. Only cookies are saved, never your password. Use it only on sites whose terms of service allow automated access on your behalf.
 
 ### Input Schema
 
@@ -2025,12 +2025,13 @@ type SiteLoginOutput struct {
     CookieCount int    `json:"cookieCount,omitempty"` // count only; names and values are never returned
     CapturedAt  string `json:"capturedAt,omitempty"`  // RFC3339
     ExpiresAt   string `json:"expiresAt,omitempty"`   // RFC3339; never later than COOKIE_VAULT_TTL from capture
+    Source      string `json:"source,omitempty"`      // "browser" (read from your running browser) | "login_window"
 }
 ```
 
 ### Behavior
 
-Requires an identified user and recorded consent for the `session_capture` purpose, which is never granted by default (HTTP: host asserts it via `POST /admin/consent`; STDIO: the operator sets `COOKIE_VAULT_STDIO_CONSENT=true`); otherwise returns `unavailable` / `no_consent` and opens no browser. The host is checked for SSRF before the browser launches. The call blocks until you close the window or `COOKIE_CAPTURE_TIMEOUT` passes (`timeout`: nothing is saved). At most `MAX_CONCURRENT_CAPTURES` windows run at once (`busy`). The browser profile is a temporary directory deleted on every exit path. Cookies are stored AES-256-GCM encrypted per (tenant, user, registrable domain), replace any earlier login for that domain, and are included in data-subject export (counts only) and erasure.
+Requires an identified user and recorded consent for the `session_capture` purpose, which is never granted by default (HTTP: host asserts it via `POST /admin/consent`; STDIO: the operator sets `COOKIE_VAULT_STDIO_CONSENT=true`); otherwise returns `unavailable` / `no_consent` and opens no browser. The host is checked for SSRF before any browser is touched. **Browser attach (zero config):** if a Chromium-family browser has remote debugging on (`chrome://inspect/#remote-debugging`, Chrome 144+), the server connects to its local debugging port, which makes the browser show an Allow prompt. After you click Allow it reads cookies, keeps only those of the site's registrable domain, and disconnects. It never launches or closes your browser. It waits up to one minute for the click. If the browser is closed, debugging is off, you decline, or you hold no cookies for the site, it falls back to the login window. The call blocks until the cookies are read, you close the window or `COOKIE_CAPTURE_TIMEOUT` passes (`timeout`: nothing is saved). At most `MAX_CONCURRENT_CAPTURES` windows run at once (`busy`). The browser profile is a temporary directory deleted on every exit path. Cookies are stored AES-256-GCM encrypted per (tenant, user, registrable domain), replace any earlier login for that domain, and are included in data-subject export (counts only) and erasure.
 
 ### Cache
 

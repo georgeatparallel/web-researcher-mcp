@@ -233,7 +233,8 @@ func main() {
 				cookieCapturer = cookievault.NewCapturer(
 					cookievault.NewRodDriver(cfg.ChromePath),
 					func(ctx context.Context, host string) error { return scraper.ValidateHost(ctx, host, allowPrivate) },
-					cfg.MaxConcurrentCaptures, cfg.CookieCaptureTimeout)
+					cfg.MaxConcurrentCaptures, cfg.CookieCaptureTimeout).
+					WithAttacher(cookievault.NewRodAttacher(time.Minute))
 			}
 			logger.Info("cookie vault enabled", "consent", "required", "ttl", cfg.CookieVaultTTL, "capture", cookieCapturer != nil)
 		}

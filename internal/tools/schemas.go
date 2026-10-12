@@ -541,6 +541,7 @@ var siteLoginOutputSchema = map[string]any{
 		"cookieCount": map[string]any{"type": "integer"},
 		"capturedAt":  map[string]any{"type": "string"},
 		"expiresAt":   map[string]any{"type": "string"},
+		"source":      map[string]any{"type": "string"}, // browser | login_window
 	},
 }
 

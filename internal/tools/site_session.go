@@ -64,11 +64,12 @@ func vaultCookiesFor(ctx context.Context, deps Dependencies, rawURL string) []co
 func registerSiteLogin(srv *mcp.Server, deps Dependencies) {
 	addTool(srv, &mcp.Tool{
 		Name: "site_login",
-		Description: "Sign in to a website yourself so scrape_page can read pages that need a login. " +
-			"Opens a visible browser window on the URL you give; you log in by hand (including 2FA or CAPTCHA) and then close the window. " +
-			"Only the resulting cookies are saved, never your password. Cookies are stored encrypted, scoped to that site's registrable domain, " +
+		Description: "Sign in to a website so scrape_page can read pages that need a login. " +
+			"First it tries your own running Chrome, Edge or Brave: if you turned on remote debugging (chrome://inspect/#remote-debugging) and click Allow in the browser, it reads only that one site's cookies from your existing signed-in session and disconnects. It never reads other sites and never closes your browser. " +
+			"If that is unavailable, or you are not signed in to the site there, it opens a visible window on the URL you give; you log in by hand (including 2FA or CAPTCHA) and close the window. " +
+			"The result's source says which path was used (browser or login_window). Only cookies are saved, never your password. Cookies are stored encrypted, scoped to that site's registrable domain, " +
 			"sent only to that site by scrape_page, expire on a short default TTL, and can be removed any time with site_logout or the data-subject erasure endpoint. " +
-			"Blocks until you close the window or the capture timeout passes (then nothing is saved). " +
+			"Blocks until the cookies are read, you close the login window, or the capture timeout passes (then nothing is saved). " +
 			"Opt-in and consent-gated: requires the 'session_capture' consent purpose, which is never granted by default (the operator must opt in explicitly). " +
 			"Use only on accounts and sites whose terms of service allow automated access on your behalf; you are responsible for that.",
 		Annotations:  writeAnnotations(false),
@@ -89,7 +90,7 @@ func registerSiteLogin(srv *mcp.Server, deps Dependencies) {
 			return structuredResult(mustJSON(map[string]any{"status": "no_consent", "reason": "no recorded consent for the 'session_capture' purpose; nothing is captured. In STDIO the operator grants it by setting COOKIE_VAULT_STDIO_CONSENT=true"})), nil, nil
 		}
 
-		domain, cookies, err := deps.CookieCapturer.Capture(ctx, input.URL)
+		domain, cookies, src, err := deps.CookieCapturer.CaptureWithSource(ctx, input.URL)
 		if err != nil {
 			return siteLoginFailure(ctx, deps, start, err), nil, nil
 		}
@@ -106,7 +107,7 @@ func registerSiteLogin(srv *mcp.Server, deps Dependencies) {
 		auditToolCall(ctx, deps, "site_login", time.Since(start), nil, "")
 		return structuredResult(mustJSON(map[string]any{
 			"status": "ok", "domain": sum.Domain, "cookieCount": sum.CookieCount,
-			"capturedAt": sum.CapturedAt, "expiresAt": sum.ExpiresAt,
+			"capturedAt": sum.CapturedAt, "expiresAt": sum.ExpiresAt, "source": string(src),
 		})), nil, nil
 	})
 }
