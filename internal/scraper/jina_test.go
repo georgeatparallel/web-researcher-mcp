@@ -2,6 +2,7 @@ package scraper
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,6 +23,9 @@ func TestMain(m *testing.M) {
 		_, _ = w.Write([]byte(`{"code":200,"status":20000,"data":{"content":""}}`))
 	}))
 	JinaReaderURL = stub.URL + "/"
+	// Pipeline tests target loopback httptest servers, which the real cloud-proxy
+	// guard (checkCloudProxyTarget) refuses by design. The guard has its own test.
+	guardCloudProxy = func(context.Context, string) error { return nil }
 	code := m.Run()
 	stub.Close()
 	os.Exit(code)
@@ -213,5 +217,46 @@ func TestScrapeJinaFallthrough(t *testing.T) {
 	}
 	if res.Tier != "jina" {
 		t.Errorf("tier should be jina, got %q", res.Tier)
+	}
+}
+
+// TestCloudProxyTiersRefusePrivateTargets: Jina and Exa never dial the target,
+// so a private or internal URL must be refused before any request leaves for the
+// third-party proxy, even with ALLOW_PRIVATE_IPS=true.
+func TestCloudProxyTiersRefusePrivateTargets(t *testing.T) {
+	hits := 0
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write([]byte(`{"code":200,"data":{"content":"x"},"results":[{"text":"x"}]}`))
+	}))
+	defer proxy.Close()
+	withJinaEndpoint(t, proxy.URL+"/")
+	prevExa := exaContentsURL
+	exaContentsURL = proxy.URL
+	t.Cleanup(func() { exaContentsURL = prevExa })
+
+	prevGuard := guardCloudProxy
+	guardCloudProxy = checkCloudProxyTarget
+	t.Cleanup(func() { guardCloudProxy = prevGuard })
+
+	p := NewPipeline(PipelineConfig{AllowPrivateIPs: true, ChromePath: chromeDisabled, ExaAPIKey: "test-key"})
+	for _, target := range []string{
+		"http://169.254.169.254/latest/meta-data/",
+		"http://127.0.0.1:8080/secret?token=abc",
+		"http://localhost/admin",
+		"http://metadata.google.internal/computeMetadata/v1/",
+	} {
+		for name, fn := range map[string]func(context.Context, string, int, bool) (*ScrapeResult, error){
+			"jina": p.scrapeJina, "exa": p.scrapeExa,
+		} {
+			_, err := fn(context.Background(), target, 1000, false)
+			var se *ScrapeError
+			if !errors.As(err, &se) || se.Kind != ErrContent {
+				t.Errorf("%s(%q) = %v, want ErrContent (skipped)", name, target, err)
+			}
+		}
+	}
+	if hits != 0 {
+		t.Errorf("proxy received %d request(s) for private targets, want 0", hits)
 	}
 }

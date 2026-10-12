@@ -37,6 +37,10 @@ func (p *Pipeline) scrapeExa(ctx context.Context, pageURL string, maxLength int,
 		return nil, contentError(pageURL, "exa tier not configured")
 	}
 
+	if err := guardCloudProxy(ctx, pageURL); err != nil {
+		return nil, err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 

@@ -31,9 +31,10 @@ var JinaReaderURL = "https://r.jina.ai/"
 // (no API key required) as the pipeline's "tier 2.5", after stealth and before
 // the html tier.
 //
-// The same SSRF/allowlist guards as every other tier already ran in Scrape
-// before this tier is reached; this method only performs the outbound request
-// to the fixed, trusted r.jina.ai host, not a direct fetch of the user URL.
+// Only the domain allowlist ran before this tier; the SSRF-safe client guards
+// the direct tiers at dial time, but this tier never dials the target, so it
+// calls guardCloudProxy itself: a private or internal URL must not be sent to
+// the third-party r.jina.ai host.
 //
 // JinaDisabled is the tier's kill switch (JINA_READER_DISABLED env var),
 // mirroring ChromePath=disabled for the browser tier: unlike Exa (opt-in via
@@ -51,6 +52,10 @@ var JinaReaderURL = "https://r.jina.ai/"
 func (p *Pipeline) scrapeJina(ctx context.Context, pageURL string, maxLength int, raw bool) (*ScrapeResult, error) {
 	if p.config.JinaDisabled {
 		return nil, contentError(pageURL, "jina tier disabled")
+	}
+
+	if err := guardCloudProxy(ctx, pageURL); err != nil {
+		return nil, err
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)

@@ -18,6 +18,8 @@ Server-Side Request Forgery is the highest-severity risk for a scraping server.
 
 **Implementation:** Custom `DialContext` on `http.Transport` — see `internal/scraper/ssrf.go`.
 
+**Cloud-proxy tiers:** The Jina and Exa tiers never dial the target themselves, so the dial-time guard cannot see it. Both call `guardCloudProxy` first and skip any non-public host, even when `ALLOW_PRIVATE_IPS=true`. The URL is never sent to the third party.
+
 The approach:
 1. Check hostname against blocklist (cloud metadata endpoints)
 2. Resolve DNS
