@@ -15,7 +15,8 @@ import (
 )
 
 type siteLoginInput struct {
-	URL string `json:"url" jsonschema:"The login page URL (http or https) of the site you want scrape_page to read while signed in. A browser window opens on this page.,required"`
+	URL            string `json:"url" jsonschema:"The login page URL (http or https) of the site you want scrape_page to read while signed in.,required"`
+	UseLoginWindow bool   `json:"use_login_window,omitempty" jsonschema:"Set true only if you do not use Chrome, Edge or Brave, or cannot turn on remote debugging. Opens a separate visible window with a fresh profile where you sign in by hand, then close the window. Default false: read the existing signed-in session from your own browser."`
 }
 
 type siteLogoutInput struct {
@@ -65,8 +66,9 @@ func registerSiteLogin(srv *mcp.Server, deps Dependencies) {
 	addTool(srv, &mcp.Tool{
 		Name: "site_login",
 		Description: "Sign in to a website so scrape_page can read pages that need a login. " +
-			"First it tries your own running Chrome, Edge or Brave: if you turned on remote debugging (chrome://inspect/#remote-debugging) and click Allow in the browser, it reads only that one site's cookies from your existing signed-in session and disconnects. It never reads other sites and never closes your browser. " +
-			"If that is unavailable, or you are not signed in to the site there, it opens a visible window on the URL you give; you log in by hand (including 2FA or CAPTCHA) and close the window. " +
+			"By default it reads the site's cookies from your own running, already signed-in Chrome, Edge or Brave: turn on remote debugging once (chrome://inspect/#remote-debugging), call this tool, and click Allow in the browser. It reads only that one site's cookies, disconnects, and never closes your browser. " +
+			"If the browser is not reachable or you are not signed in to the site there, the result is a status (browser_unavailable or not_signed_in) with the steps to fix it; no window is opened. " +
+			"For other browsers, or if you cannot enable remote debugging, call it again with use_login_window=true: a separate visible window with a fresh profile opens on the URL; you sign in by hand (including 2FA or CAPTCHA) and close the window. " +
 			"The result's source says which path was used (browser or login_window). Only cookies are saved, never your password. Cookies are stored encrypted, scoped to that site's registrable domain, " +
 			"sent only to that site by scrape_page, expire on a short default TTL, and can be removed any time with site_logout or the data-subject erasure endpoint. " +
 			"Blocks until the cookies are read, you close the login window, or the capture timeout passes (then nothing is saved). " +
@@ -90,7 +92,7 @@ func registerSiteLogin(srv *mcp.Server, deps Dependencies) {
 			return structuredResult(mustJSON(map[string]any{"status": "no_consent", "reason": "no recorded consent for the 'session_capture' purpose; nothing is captured. In STDIO the operator grants it by setting COOKIE_VAULT_STDIO_CONSENT=true"})), nil, nil
 		}
 
-		domain, cookies, src, err := deps.CookieCapturer.CaptureWithSource(ctx, input.URL)
+		domain, cookies, src, err := deps.CookieCapturer.CaptureWithSource(ctx, input.URL, input.UseLoginWindow)
 		if err != nil {
 			return siteLoginFailure(ctx, deps, start, err), nil, nil
 		}
@@ -123,6 +125,10 @@ func siteLoginFailure(ctx context.Context, deps Dependencies, start time.Time, e
 		status, msg = "timeout", "the login window was not closed in time; nothing was saved"
 	case errors.Is(err, cookievault.ErrInvalidLoginURL):
 		status, msg = "invalid_url", "the login URL must be an http(s) URL on a site with a registrable domain, without credentials"
+	case errors.Is(err, cookievault.ErrAttachUnavailable):
+		status, msg = "browser_unavailable", "could not reach your browser. In Chrome, Edge or Brave open chrome://inspect/#remote-debugging, turn it on, keep the browser running, call site_login again and click Allow. If you use another browser or cannot enable it, call site_login again with use_login_window=true"
+	case errors.Is(err, cookievault.ErrNotSignedIn):
+		status, msg = "not_signed_in", "your browser has no cookies for that site. Sign in to the site in that browser, then call site_login again. To sign in in a separate window instead, call site_login with use_login_window=true"
 	case errors.Is(err, cookievault.ErrNothingCaptured):
 		status, msg = "nothing_captured", "no cookies were captured for that site; nothing was saved"
 	case errors.Is(err, cookievault.ErrLoginURLRejected):

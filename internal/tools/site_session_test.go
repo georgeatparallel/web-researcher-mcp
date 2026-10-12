@@ -382,7 +382,7 @@ func TestCanaryCookieNeverLeaks(t *testing.T) {
 	sess := e.client(t, "default", "alice")
 
 	var surfaces []string
-	_, text := callVaultTool(t, sess, "site_login", map[string]any{"url": "http://" + vaultTestHost + "/login"})
+	_, text := callVaultTool(t, sess, "site_login", map[string]any{"url": "http://" + vaultTestHost + "/login", "use_login_window": true})
 	surfaces = append(surfaces, text)
 	_, text = callVaultTool(t, sess, "scrape_page", map[string]any{"url": e.site.pageURL()})
 	surfaces = append(surfaces, text)
@@ -438,14 +438,46 @@ func TestSiteLoginRequiresConsent(t *testing.T) {
 	}
 
 	e.grant(t, "default", "alice")
-	out, text := callVaultTool(t, alice, "site_login", map[string]any{"url": "http://" + vaultTestHost + "/login"})
-	if out["status"] != "ok" || out["domain"] != vaultTestDomain {
+	out, text := callVaultTool(t, alice, "site_login", map[string]any{"url": "http://" + vaultTestHost + "/login", "use_login_window": true})
+	if out["status"] != "ok" || out["domain"] != vaultTestDomain || out["source"] != "login_window" {
 		t.Fatalf("with consent: %s", text)
 	}
 	if out["cookieCount"] != float64(1) {
 		t.Errorf("cookieCount = %v, want 1", out["cookieCount"])
 	}
 }
+
+func TestSiteLoginDefaultNeedsBrowserNotWindow(t *testing.T) {
+	e := newVaultEnv(t)
+	e.grant(t, "default", "alice")
+	alice := e.client(t, "default", "alice")
+	url := "http://" + vaultTestHost + "/login"
+
+	// No attacher configured: tell the user how to enable it, open no window.
+	out, text := callVaultTool(t, alice, "site_login", map[string]any{"url": url})
+	if out["status"] != "browser_unavailable" || !strings.Contains(text, "remote-debugging") || !strings.Contains(text, "use_login_window") {
+		t.Fatalf("no attacher: %s", text)
+	}
+
+	// Browser reached but not signed in to the site.
+	e.deps.CookieCapturer.WithAttacher(emptyAttacher{})
+	out, text = callVaultTool(t, alice, "site_login", map[string]any{"url": url})
+	if out["status"] != "not_signed_in" || !strings.Contains(text, "use_login_window") {
+		t.Fatalf("empty browser: %s", text)
+	}
+
+	if n := e.driver.openCount(); n != 0 {
+		t.Errorf("login window opened %d times without use_login_window", n)
+	}
+	if got := e.deps.CookieVault.List(context.Background(), cookievault.Subject{TenantID: "default", UserID: "alice"}); len(got) != 0 {
+		t.Errorf("vault holds %d bundles after failed logins", len(got))
+	}
+}
+
+// emptyAttacher reaches the browser but finds no cookies for the site.
+type emptyAttacher struct{}
+
+func (emptyAttacher) Attach(context.Context, string) ([]cookievault.Cookie, error) { return nil, nil }
 
 func TestScrapeSkipsVaultWithoutConsent(t *testing.T) {
 	e := newVaultEnv(t)

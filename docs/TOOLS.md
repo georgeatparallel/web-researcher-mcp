@@ -2011,19 +2011,20 @@ Requires an authenticated user and recorded consent for the `monitoring` purpose
 
 ### Purpose
 
-Let `scrape_page` read pages behind your login. It first tries your own running Chrome, Edge or Brave and reads only that site's cookies from your existing session. If that is unavailable, or you are not signed in there, a visible window opens on the URL. You log in by hand (2FA and CAPTCHA included) and close the window. Only cookies are saved, never your password. Use it only on sites whose terms of service allow automated access on your behalf.
+Let `scrape_page` read pages behind your login. By default it reads only that site's cookies from your own running, signed-in Chrome, Edge or Brave. If that browser is unreachable, or you are not signed in there, it returns a status with the fix and opens nothing. For other browsers, set `use_login_window` to open a separate window with a fresh profile: you log in by hand (2FA and CAPTCHA included) and close the window. Only cookies are saved, never your password. Use it only on sites whose terms of service allow automated access on your behalf.
 
 ### Input Schema
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `url` | string | yes | http(s) login page. Must have a registrable domain (no IP addresses, `localhost` or bare public suffixes) and no embedded credentials. Private and internal hosts are refused |
+| `use_login_window` | boolean | no | Default `false`. Set `true` if you do not use Chrome, Edge or Brave, or cannot turn on remote debugging: skips your browser and opens a separate visible window with a fresh profile. The window has none of your existing sessions, so you sign in by hand |
 
 ### Output Schema
 
 ```go
 type SiteLoginOutput struct {
-    Status      string `json:"status"`                // "ok" | "no_consent" | "unavailable" | "busy" | "timeout" | "invalid_url" | "blocked" | "nothing_captured" | "failed"
+    Status      string `json:"status"`                // "ok" | "no_consent" | "unavailable" | "browser_unavailable" | "not_signed_in" | "busy" | "timeout" | "invalid_url" | "blocked" | "nothing_captured" | "failed"
     Reason      string `json:"reason,omitempty"`
     Domain      string `json:"domain,omitempty"`      // registrable domain the cookies are scoped to
     CookieCount int    `json:"cookieCount,omitempty"` // count only; names and values are never returned
@@ -2035,7 +2036,7 @@ type SiteLoginOutput struct {
 
 ### Behavior
 
-Requires an identified user and recorded consent for the `session_capture` purpose, which is never granted by default (HTTP: host asserts it via `POST /admin/consent`; STDIO: the operator sets `COOKIE_VAULT_STDIO_CONSENT=true`); otherwise returns `unavailable` / `no_consent` and opens no browser. The host is checked for SSRF before any browser is touched. **Browser attach (zero config):** if a Chromium-family browser has remote debugging on (`chrome://inspect/#remote-debugging`, Chrome 144+), the server connects to its local debugging port, which makes the browser show an Allow prompt. After you click Allow it reads cookies, keeps only those of the site's registrable domain, and disconnects. It never launches or closes your browser. It waits up to one minute for the click. If the browser is closed, debugging is off, you decline, or you hold no cookies for the site, it falls back to the login window. The call blocks until the cookies are read, you close the window or `COOKIE_CAPTURE_TIMEOUT` passes (`timeout`: nothing is saved). At most `MAX_CONCURRENT_CAPTURES` windows run at once (`busy`). The browser profile is a temporary directory deleted on every exit path. Cookies are stored AES-256-GCM encrypted per (tenant, user, registrable domain), replace any earlier login for that domain, and are included in data-subject export (counts only) and erasure.
+Requires an identified user and recorded consent for the `session_capture` purpose, which is never granted by default (HTTP: host asserts it via `POST /admin/consent`; STDIO: the operator sets `COOKIE_VAULT_STDIO_CONSENT=true`); otherwise returns `unavailable` / `no_consent` and opens no browser. The host is checked for SSRF before any browser is touched. **Browser attach (zero config):** if a Chromium-family browser has remote debugging on (`chrome://inspect/#remote-debugging`, Chrome 144+), the server connects to its local debugging port, which makes the browser show an Allow prompt. After you click Allow it reads cookies, keeps only those of the site's registrable domain, and disconnects. It never launches or closes your browser. It waits up to one minute for the click. If the browser is closed, debugging is off or you decline, it returns `browser_unavailable`. If you hold no cookies for the site, it returns `not_signed_in`. Neither opens a window; the reason names the steps and the `use_login_window` option. **Login window (`use_login_window=true`):** skips your browser and opens a visible window on a fresh profile. The call blocks until you close the window or `COOKIE_CAPTURE_TIMEOUT` passes (`timeout`: nothing is saved). The window path cannot tell a signed-in session from an anonymous one, so a failed sign-in is only noticed when `scrape_page` reports `loginRequired`. At most `MAX_CONCURRENT_CAPTURES` windows run at once (`busy`). The browser profile is a temporary directory deleted on every exit path. Cookies are stored AES-256-GCM encrypted per (tenant, user, registrable domain), replace any earlier login for that domain, and are included in data-subject export (counts only) and erasure.
 
 ### Cache
 

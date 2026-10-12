@@ -16,6 +16,8 @@ var (
 	ErrCaptureTimeout  = errors.New("cookievault: login window was not closed before the timeout")
 	ErrInvalidLoginURL = errors.New("cookievault: login URL must be http(s) with a registrable domain")
 	ErrNothingCaptured = errors.New("cookievault: no cookies were set for this domain")
+	// ErrNotSignedIn: the user's browser was reached but holds no cookies for the site.
+	ErrNotSignedIn = errors.New("cookievault: the browser holds no cookies for this site")
 	// ErrLoginURLRejected wraps the HostValidator error when the login host is
 	// not allowed (e.g. a private address).
 	ErrLoginURLRejected = errors.New("cookievault: login URL host is not allowed")
@@ -66,8 +68,8 @@ type Capturer struct {
 	attacher Attacher
 }
 
-// WithAttacher makes Capture try the user's own running browser before opening
-// a login window. A nil attacher disables that step.
+// WithAttacher sets how CaptureWithSource reads cookies from the user's own
+// running browser. A nil attacher makes that path report ErrAttachUnavailable.
 func (c *Capturer) WithAttacher(a Attacher) *Capturer {
 	c.attacher = a
 	return c
@@ -88,28 +90,29 @@ func NewCapturer(driver Driver, validate HostValidator, maxConcurrent int, timeo
 	}
 }
 
-// Capture is CaptureWithSource without the source.
+// Capture is CaptureWithSource in login-window mode, without the source.
 func (c *Capturer) Capture(ctx context.Context, loginURL string) (string, []Cookie, error) {
-	domain, cookies, _, err := c.CaptureWithSource(ctx, loginURL)
+	domain, cookies, _, err := c.CaptureWithSource(ctx, loginURL, true)
 	return domain, cookies, err
 }
 
 // CaptureWithSource returns the registrable domain of loginURL and its cookies.
-// With an Attacher it first reads them from the user's own signed-in browser.
-// If that is unavailable or holds none for the domain, it opens loginURL in a
-// visible browser and returns the cookies once the user closes the window. The
-// window's profile is a fresh temp directory removed on every exit path. Nothing
-// is stored here: on timeout or cancellation the caller gets an error and no
-// cookies.
-func (c *Capturer) CaptureWithSource(ctx context.Context, loginURL string) (string, []Cookie, Source, error) {
-	domain, cookies, src, err := c.capture(ctx, loginURL)
+// By default (useWindow false) it reads them from the user's own signed-in
+// browser through the Attacher, and never opens a window: ErrAttachUnavailable
+// or ErrNotSignedIn tell the caller what to fix. With useWindow it skips the
+// user's browser and opens loginURL in a visible browser with a fresh temp
+// profile, returning the cookies once the user closes the window; that profile
+// is removed on every exit path. Nothing is stored here: on timeout or
+// cancellation the caller gets an error and no cookies.
+func (c *Capturer) CaptureWithSource(ctx context.Context, loginURL string, useWindow bool) (string, []Cookie, Source, error) {
+	domain, cookies, src, err := c.capture(ctx, loginURL, useWindow)
 	if err != nil {
 		return "", nil, "", err
 	}
 	return domain, cookies, src, nil
 }
 
-func (c *Capturer) capture(ctx context.Context, loginURL string) (string, []Cookie, Source, error) {
+func (c *Capturer) capture(ctx context.Context, loginURL string, useWindow bool) (string, []Cookie, Source, error) {
 	u, err := url.Parse(loginURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
 		return "", nil, "", ErrInvalidLoginURL
@@ -131,15 +134,21 @@ func (c *Capturer) capture(ctx context.Context, loginURL string) (string, []Cook
 		return "", nil, "", ErrCaptureBusy
 	}
 
-	if c.attacher != nil {
-		// Any failure (no browser, debugging off, prompt declined, no cookies for
-		// this site) falls through to the login window.
-		if cookies, err := c.attacher.Attach(ctx, domain); err == nil && len(cookies) > 0 {
-			return domain, cookies, SourceBrowser, nil
+	if !useWindow {
+		if c.attacher == nil {
+			return "", nil, "", ErrAttachUnavailable
 		}
+		cookies, err := c.attacher.Attach(ctx, domain)
 		if ctx.Err() != nil {
 			return "", nil, "", ctx.Err()
 		}
+		if err != nil {
+			return "", nil, "", ErrAttachUnavailable
+		}
+		if len(cookies) == 0 {
+			return "", nil, "", ErrNotSignedIn
+		}
+		return domain, cookies, SourceBrowser, nil
 	}
 
 	profileDir, err := os.MkdirTemp("", "wrmcp-login-*")
