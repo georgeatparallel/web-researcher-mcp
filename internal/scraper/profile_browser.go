@@ -71,7 +71,7 @@ func (p *Pipeline) ScrapeWithProfile(ctx context.Context, rawURL string, maxLeng
 	if bin == "" {
 		bin = cookievault.ResolveBrowser(p.config.ChromePath)
 	}
-	pb, err := cookievault.LaunchBrowser(cookievault.BrowserLaunch{Bin: bin, Dir: spec.Dir, Headless: true, NoSandbox: true})
+	pb, err := cookievault.LaunchBrowser(cookievault.BrowserLaunch{Bin: bin, Dir: spec.Dir, Headless: true, NoSandbox: p.config.ChromeNoSandbox})
 	if err != nil {
 		return nil, browserError(rawURL, err, "could not start the browser for the saved sign-in")
 	}

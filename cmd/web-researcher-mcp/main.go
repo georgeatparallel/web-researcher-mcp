@@ -243,7 +243,7 @@ func main() {
 			if (cfg.Port == 0 || cfg.CookieCaptureInHTTP) && cfg.ChromePath != "disabled" {
 				allowPrivate := cfg.AllowPrivateIPs
 				cookieCapturer = cookievault.NewCapturer(
-					cookievault.NewRodDriver(cfg.ChromePath),
+					cookievault.NewRodDriver(cfg.ChromePath).WithNoSandbox(cfg.ChromeNoSandbox),
 					func(ctx context.Context, host string) error { return scraper.ValidateHost(ctx, host, allowPrivate) },
 					cfg.MaxConcurrentCaptures, cfg.CookieCaptureTimeout).
 					WithProfiles(profileStore)
@@ -485,6 +485,7 @@ func main() {
 		AllowPrivateIPs:         cfg.AllowPrivateIPs,
 		AllowedDomains:          cfg.AllowedDomains,
 		ChromePath:              cfg.ChromePath,
+		ChromeNoSandbox:         cfg.ChromeNoSandbox,
 		BrowserIdleTimeout:      cfg.BrowserIdleTimeout, // auto-close idle Chromium process (#460)
 		ExaAPIKey:               cfg.Search.ExaAPIKey,   // enables the paid Exa /contents fallback tier
 		JinaAPIKey:              cfg.Search.JinaAPIKey,  // raises the keyless Jina Reader tier's rate limit

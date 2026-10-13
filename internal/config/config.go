@@ -48,6 +48,7 @@ type Config struct {
 	AllowPrivateIPs               bool
 	AllowedDomains                []string
 	ChromePath                    string
+	ChromeNoSandbox               bool // CHROME_NO_SANDBOX: run saved-login browsers without Chrome's sandbox (containers)
 	JinaDisabled                  bool
 	BrowserIdleTimeout            time.Duration
 	MaxScrapeConcurrency          int
@@ -630,6 +631,7 @@ func Load() (*Config, error) {
 		AllowPrivateIPs: envBool("ALLOW_PRIVATE_IPS", false),
 		AllowedDomains:  splitCSV(os.Getenv("ALLOWED_DOMAINS")),
 		ChromePath:      os.Getenv("CHROME_PATH"),
+		ChromeNoSandbox: envBool("CHROME_NO_SANDBOX", false),
 		JinaDisabled:    envBool("JINA_READER_DISABLED", false),
 		// BrowserIdleTimeout closes the browser-tier Chromium process after this
 		// long with no scrapeBrowser/ExtractLinks call (#460) — without it, one

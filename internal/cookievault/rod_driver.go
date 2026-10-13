@@ -14,6 +14,7 @@ import (
 type RodDriver struct {
 	chromePath string
 	headless   bool // tests only; production login must be visible
+	noSandbox  bool
 }
 
 // NewRodDriver returns a headed Driver. An empty chromePath uses the
@@ -24,12 +25,19 @@ func NewRodDriver(chromePath string) *RodDriver {
 	return &RodDriver{chromePath: chromePath}
 }
 
+// WithNoSandbox runs the login and verification browsers without Chrome's
+// sandbox, for containers that cannot run it (CHROME_NO_SANDBOX).
+func (d *RodDriver) WithNoSandbox(v bool) *RodDriver {
+	d.noSandbox = v
+	return d
+}
+
 // BrowserBin returns the browser binary this driver launches ("" when go-rod
 // will download one).
 func (d *RodDriver) BrowserBin() string { return ResolveBrowser(d.chromePath) }
 
 func (d *RodDriver) launch(profileDir string, headless bool) BrowserLaunch {
-	return BrowserLaunch{Bin: d.BrowserBin(), Dir: profileDir, Headless: headless, NoSandbox: d.headless}
+	return BrowserLaunch{Bin: d.BrowserBin(), Dir: profileDir, Headless: headless, NoSandbox: d.noSandbox || d.headless}
 }
 
 // Open launches Chromium on profileDir and navigates to loginURL.

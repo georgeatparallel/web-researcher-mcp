@@ -19,7 +19,11 @@ import (
 // ErrBrowserLaunch is returned when the browser cannot be started or reached.
 var ErrBrowserLaunch = errors.New("cookievault: could not start the browser")
 
-const browserExitWait = 10 * time.Second
+const (
+	browserExitWait    = 10 * time.Second
+	browserConnectWait = 20 * time.Second
+	browserCloseWait   = 5 * time.Second
+)
 
 // lookPath finds an installed browser; a variable so tests can stub it.
 var lookPath = launcher.LookPath
@@ -43,7 +47,8 @@ type BrowserLaunch struct {
 	Bin      string // browser binary; "" lets go-rod pick one
 	Dir      string // profile (user data) dir; never deleted here
 	Headless bool
-	// NoSandbox is set only where the OS requires it (root in a container, CI).
+	// NoSandbox turns Chrome's sandbox off. Set it only where the OS cannot run the
+	// sandbox (a container without user namespaces, CI); root always needs it.
 	NoSandbox bool
 }
 
@@ -58,7 +63,11 @@ func (o BrowserLaunch) newLauncher() *launcher.Launcher {
 		Delete("enable-automation").
 		// Hides navigator.webdriver, which sites read as "this is a bot" and use to
 		// drop the session. A base flag, not a fingerprint override (issue #775).
-		Set("disable-blink-features", "AutomationControlled")
+		Set("disable-blink-features", "AutomationControlled").
+		// go-rod turns site isolation off by default. A browser that holds a login
+		// must keep Chrome's stock isolation between sites.
+		Delete("disable-site-isolation-trials").
+		Set("disable-features", "TranslateUI")
 	if o.Bin != "" {
 		l = l.Bin(o.Bin)
 	}
@@ -77,9 +86,17 @@ func (o BrowserLaunch) newLauncher() *launcher.Launcher {
 type ProfileBrowser struct {
 	// Browser is the connected go-rod handle.
 	Browser *rod.Browser
-	l       *launcher.Launcher
-	addr    string
 	once    sync.Once
+
+	// Port mode (Windows): a loopback debug port.
+	l    *launcher.Launcher
+	addr string
+
+	// Pipe mode: the browser process and its DevTools pipes.
+	pid        int
+	exited     chan struct{}
+	kill       func()
+	closePipes func()
 }
 
 // LaunchBrowser starts a browser per o and connects to it. A failed start is
@@ -99,6 +116,9 @@ func LaunchBrowser(o BrowserLaunch) (*ProfileBrowser, error) {
 }
 
 func launchOnce(o BrowserLaunch) (*ProfileBrowser, error) {
+	if pipeSupported {
+		return launchPipe(o)
+	}
 	l := o.newLauncher()
 	controlURL, err := l.Launch()
 	if err != nil {
@@ -124,7 +144,18 @@ func launchOnce(o BrowserLaunch) (*ProfileBrowser, error) {
 // (issue #775). It never deletes the profile dir. Safe to call more than once.
 func (b *ProfileBrowser) Shutdown() {
 	b.once.Do(func() {
-		_ = b.Browser.Close()
+		if b.Browser != nil {
+			closed := make(chan struct{})
+			go func() { _ = b.Browser.Close(); close(closed) }()
+			select {
+			case <-closed:
+			case <-time.After(browserCloseWait):
+			}
+		}
+		if b.exited != nil {
+			b.waitPipeExit()
+			return
+		}
 		deadline := time.Now().Add(browserExitWait)
 		for time.Now().Before(deadline) {
 			dialer := net.Dialer{Timeout: 200 * time.Millisecond}
@@ -138,4 +169,20 @@ func (b *ProfileBrowser) Shutdown() {
 		slog.Warn("browser did not exit in time; killing it")
 		b.l.Kill()
 	})
+}
+
+// waitPipeExit waits for the browser process, killing it only after the clean
+// exit window has passed, then closes the pipes.
+func (b *ProfileBrowser) waitPipeExit() {
+	select {
+	case <-b.exited:
+	case <-time.After(browserExitWait):
+		slog.Warn("browser did not exit in time; killing it")
+		b.kill()
+		select {
+		case <-b.exited:
+		case <-time.After(2 * time.Second):
+		}
+	}
+	b.closePipes()
 }

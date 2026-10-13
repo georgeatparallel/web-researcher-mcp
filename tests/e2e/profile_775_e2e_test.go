@@ -198,6 +198,7 @@ func profileEnv(cacheDir, chrome string) []string {
 		"CACHE_DIR=" + cacheDir,
 		"ALLOW_PRIVATE_IPS=true",
 		"CHROME_PATH=" + chrome,
+		"CHROME_NO_SANDBOX=true", // CI runners cannot always run the sandbox
 		"GOOGLE_CUSTOM_SEARCH_API_KEY=test",
 		"GOOGLE_CUSTOM_SEARCH_ID=test",
 	}

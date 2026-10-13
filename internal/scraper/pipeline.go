@@ -15,6 +15,7 @@ import (
 	"github.com/go-rod/stealth"
 	"github.com/zoharbabin/web-researcher-mcp/internal/auth"
 	"github.com/zoharbabin/web-researcher-mcp/internal/content"
+	"golang.org/x/net/idna"
 )
 
 type PipelineConfig struct {
@@ -41,6 +42,7 @@ type PipelineConfig struct {
 	AllowPrivateIPs         bool
 	AllowedDomains          []string
 	ChromePath              string
+	ChromeNoSandbox         bool // saved-login browsers run without Chrome's sandbox (CHROME_NO_SANDBOX)
 	// BrowserIdleTimeout closes the browser pool's Chromium process after this
 	// long with no scrapeBrowser/ExtractLinks call (#460), bounding how long a
 	// single browser-tier scrape pins a Chromium process (and its Dock icon on
@@ -1166,6 +1168,10 @@ func hostnameMatches(rawURL, domain string) bool {
 	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
 	if host == "" {
 		return false
+	}
+	// Saved-login domains are stored in ASCII (punycode) form.
+	if ascii, err := idna.Lookup.ToASCII(host); err == nil {
+		host = ascii
 	}
 	return host == domain || strings.HasSuffix(host, "."+domain)
 }
