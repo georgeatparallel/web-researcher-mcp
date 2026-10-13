@@ -216,7 +216,7 @@ var scrapePageOutputSchema = map[string]any{
 		"estimatedTokens":   map[string]any{"type": "integer"},
 		"sizeCategory":      map[string]any{"type": "string"},
 		"raw":               map[string]any{"type": "boolean"},
-		"authenticated":     map[string]any{"type": "boolean", "description": "True when the page was fetched with your saved site_login cookies. Such results are never cached. It does not prove you are signed in: check loginRequired. Omitted for anonymous scrapes."},
+		"authenticated":     map[string]any{"type": "boolean", "description": "True when the page was fetched with your saved site_login browser profile or cookies. Such results are never cached. It does not prove you are signed in: check loginRequired. Omitted for anonymous scrapes."},
 		"loginRequired":     map[string]any{"type": "boolean", "description": "True when the page looks like a sign-in page instead of the content you asked for (heuristic). Present only when site_login is available. Omitted otherwise."},
 		"loginHint":         map[string]any{"type": "string", "description": "Next step when loginRequired is true: call site_login to sign in (or sign in again if a saved login was sent)."},
 		"extractedBy":       map[string]any{"type": "string", "description": "Which extraction tier produced the content (markdown, stealth, jina, html, browser, or exa:cached/exa:crawled for the paid Exa fallback). Provenance only; omitted when unknown."},

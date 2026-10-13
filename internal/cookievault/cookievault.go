@@ -5,7 +5,7 @@
 // Bundles are keyed by (tenant, user, registrable domain) with every component
 // hashed, so one user's logins are never visible to another tenant or user.
 // Cookie names and values never leave this package except through Get (for
-// injection into a request) — every log, audit and export surface uses Summary.
+// injection into a request). Every log, audit and export surface uses Summary.
 package cookievault
 
 import (

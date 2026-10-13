@@ -1017,3 +1017,14 @@ func TestLoginHintForProfileNeedsWindow(t *testing.T) {
 		t.Errorf("cookie hint %q should not force the window", h)
 	}
 }
+
+func TestSiteLogoutAcceptsSchemeLessURL(t *testing.T) {
+	e := newVaultEnv(t)
+	e.grant(t, "default", "alice")
+	e.seedProfile(t, "default", "alice")
+	alice := e.client(t, "default", "alice")
+	out, _ := callVaultTool(t, alice, "site_logout", map[string]any{"domain": vaultTestHost + "/feed?x=1"})
+	if out["removedProfile"] != true {
+		t.Fatalf("logout with a path = %v, want the profile removed", out)
+	}
+}

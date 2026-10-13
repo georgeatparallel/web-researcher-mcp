@@ -355,6 +355,20 @@ Routing decisions, provider health, and recent errors are surfaced to operators 
 
 None of these is a personal-data store. Field contracts live in `docs/TOOLS.md` (Routing Provenance) and `docs/DEPLOYMENT.md` (Operator Observability).
 
+### Layer 9: Saved logins (opt-in, `COOKIE_VAULT_ENABLED`)
+
+`site_login` keeps a signed-in browser profile or a cookie bundle so `scrape_page` can read pages behind a login (#241, #775). Controls:
+
+- **Consent and identity:** fail-closed on the `session_capture` purpose and an identified user. Never auto-granted. STDIO opts in with `COOKIE_VAULT_STDIO_CONSENT`.
+- **Encryption:** AES-256-GCM files under `COOKIE_VAULT_ENCRYPTION_KEY`, a different key from the cache. File names are hashes of (tenant, user, domain). Each archive is bound to its owner, so a copied file will not open under another subject.
+- **Scope:** cookies and profile navigation stay on the saved site's registrable domain. Redirects to other hosts get nothing. SSRF checks run first.
+- **No leaks:** logs, audit events, metrics and exports carry a kind, a domain and a status. Never a cookie name or value. Erasure through `/admin/data` removes both kinds.
+- **No cache:** signed-in results skip every shared cache and the artifact store.
+- **Plaintext window:** while a profile lease is open, its work folder holds unencrypted cookies in a `0700` folder under `CACHE_DIR`. It is removed on every exit path and swept at startup if it is over an hour old.
+- **Browser flags:** profile browsers use the stock launch flags plus `disable-blink-features=AutomationControlled` (hides `navigator.webdriver`). No user-agent, time zone, stealth or incognito override.
+- **HTTP:** the server never attaches to a running browser. The login window opens only with `COOKIE_CAPTURE_IN_HTTP=true` and a display, and opens on the server host, so use it for self-hosted single-user setups.
+- **One process per cache:** saved logins live on local disk and each server process keeps its own in-memory state. A `site_logout` or erasure in one process does not reach another process that shares the same `CACHE_DIR`, so give each process its own cache dir, or use sticky routing with several pods.
+
 ---
 
 ## Encryption

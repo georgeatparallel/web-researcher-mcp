@@ -276,6 +276,16 @@ type ProfileLease struct {
 	once  sync.Once
 }
 
+// Has reports whether a live saved profile exists for host's registrable domain.
+func (s *ProfileStore) Has(sub Subject, host string) bool {
+	_, key, err := resolve(sub, host)
+	if err != nil {
+		return false
+	}
+	_, ok := s.readMeta(key)
+	return ok
+}
+
 // Acquire leases the saved profile for host's registrable domain, unpacked
 // into a private work dir. It returns ErrNoProfile when there is none (an
 // expired or unreadable archive is deleted), and ErrProfileBusy when another
@@ -294,6 +304,12 @@ func (s *ProfileStore) Acquire(ctx context.Context, sub Subject, host string) (*
 		return nil, err
 	}
 	if lease.Fresh {
+		// The archive was unreadable or mismatched: remove it so it stops counting
+		// toward the cap and is not unpacked on every scrape. Deleted while the key
+		// lock is still held, so a concurrent login cannot lose a good profile.
+		s.mu.Lock()
+		_, _ = s.deleteLocked(key)
+		s.mu.Unlock()
 		lease.Discard()
 		return nil, ErrNoProfile
 	}
@@ -463,15 +479,21 @@ func (s *ProfileStore) Delete(ctx context.Context, sub Subject, host string) (bo
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.deleteLocked(key), nil
+	return s.deleteLocked(key)
 }
 
-func (s *ProfileStore) deleteLocked(key string) bool {
+// deleteLocked removes key's archive and invalidates any lease in flight. A
+// missing file is (false, nil); any other failure is returned, so an erasure is
+// never reported as done when the file is still there. The caller holds s.mu.
+func (s *ProfileStore) deleteLocked(key string) (bool, error) {
 	if ks := s.keys[key]; ks != nil {
 		ks.gen++
 	}
 	err := os.Remove(s.path(key))
-	return err == nil
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // List returns redacted summaries of the subject's live profiles.
@@ -496,11 +518,24 @@ func (s *ProfileStore) EraseAll(ctx context.Context, sub Subject) (int, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// A first-time login has no archive yet; bump its generation so it cannot
+	// commit after the erasure.
+	prefix := subjectPrefix(sub)
+	for k, ks := range s.keys {
+		if strings.HasPrefix(k, prefix) {
+			ks.gen++
+		}
+	}
 	n := 0
+	var errs []error
 	for _, k := range s.keysFor(sub) {
-		if s.deleteLocked(k) {
+		ok, err := s.deleteLocked(k)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("remove saved profile: %w", err))
+		}
+		if ok {
 			n++
 		}
 	}
-	return n, nil
+	return n, errors.Join(errs...)
 }

@@ -56,6 +56,8 @@ func (o BrowserLaunch) newLauncher() *launcher.Launcher {
 		UserDataDir(o.Dir).
 		Set("no-first-run").
 		Delete("enable-automation").
+		// Hides navigator.webdriver, which sites read as "this is a bot" and use to
+		// drop the session. A base flag, not a fingerprint override (issue #775).
 		Set("disable-blink-features", "AutomationControlled")
 	if o.Bin != "" {
 		l = l.Bin(o.Bin)

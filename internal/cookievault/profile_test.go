@@ -552,3 +552,54 @@ func TestProfileLimitPerSubject(t *testing.T) {
 		t.Fatalf("EraseAll = %d", n)
 	}
 }
+
+func TestProfileEraseAllInvalidatesFirstTimeLogin(t *testing.T) {
+	t.Parallel()
+	s := newTestProfileStore(t)
+	l, err := s.Begin(context.Background(), subjA, "linkedin.com") // no archive yet
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EraseAll(context.Background(), subjA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Commit(context.Background()); !errors.Is(err, ErrNoProfile) {
+		t.Fatalf("login committed after erasure: %v", err)
+	}
+	if _, err := s.Acquire(context.Background(), subjA, "linkedin.com"); !errors.Is(err, ErrNoProfile) {
+		t.Fatalf("profile came back after erasure: %v", err)
+	}
+}
+
+func TestProfileDeleteReportsRemovalFailure(t *testing.T) {
+	t.Parallel()
+	s := newTestProfileStore(t)
+	_, key, _ := resolve(subjA, "linkedin.com")
+	// A non-empty directory where the archive should be makes os.Remove fail.
+	if err := os.MkdirAll(filepath.Join(s.path(key), "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.Delete(context.Background(), subjA, "linkedin.com"); ok || err == nil {
+		t.Fatalf("Delete = %v, %v; want a removal error", ok, err)
+	}
+	if n, err := s.EraseAll(context.Background(), subjA); n != 0 || err == nil {
+		t.Fatalf("EraseAll = %d, %v; want a removal error", n, err)
+	}
+}
+
+func TestProfileAcquireRemovesUnreadableArchive(t *testing.T) {
+	t.Parallel()
+	s := newTestProfileStore(t)
+	saveProfile(t, s, subjA, "linkedin.com", "x")
+	_, key, _ := resolve(subjA, "linkedin.com")
+	raw, _ := os.ReadFile(s.path(key))
+	if err := os.WriteFile(s.path(key), raw[:len(raw)-9], 0o600); err != nil { // truncated tail
+		t.Fatal(err)
+	}
+	if _, err := s.Acquire(context.Background(), subjA, "linkedin.com"); !errors.Is(err, ErrNoProfile) {
+		t.Fatalf("Acquire = %v, want ErrNoProfile", err)
+	}
+	if _, err := os.Stat(s.path(key)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unreadable archive still on disk: %v", err)
+	}
+}

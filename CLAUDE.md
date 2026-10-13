@@ -115,7 +115,7 @@ Registry/manifest files (root, each read by a different external tool): `server.
 - **Audit**: every tool call logs `audit.AuditEvent{ToolName, Duration, Success, Metadata, ...}` via `deps.Auditor.Log()`
 - **SSRF protection**: `scraper.NewSSRFSafeClient()` validates all resolved IPs before connecting
 - **Content pipeline**: raw HTML → sanitize (bluemonday) → dedup (paragraph hashing) → truncate (sentence boundary) → quality score
-- **Tool annotations**: read tools use `readOnlyAnnotations(idempotent, openWorld)`; write tools (`memory_save`, `archive_source`, `workspace_contribute`) use `writeAnnotations(idempotent)` — both enforced by `TestAllToolsHaveAnnotations` in CI
+- **Tool annotations**: read tools use `readOnlyAnnotations(idempotent, openWorld)`; write tools (`memory_save`, `archive_source`, `workspace_contribute`, `site_login`, `site_logout`) use `writeAnnotations(idempotent)` — both enforced by `TestAllToolsHaveAnnotations` in CI
 - **Consent gate (regulated tools)**: `deps.Consent.HasConsent(ctx, consent.PurposeMemory)` (pass one `Purpose` constant per call site) is fail-closed; subject identity comes from `auth.UserIDFromContext`/`auth.TenantIDFromContext`, never a tool param
 - **Data-subject rights**: per-user stores register an `Exporter`/`Eraser` in `internal/datasubject` (keyed `(tenantID,userID)`) so `/admin/data` export+erasure reaches them
 - **Redis isolation**: `internal/redisbackend` is the ONLY package importing go-redis; constructed in one gated place in `main.go` (`Port>0 && REDIS_URL!=""`) — fail-fast, encryption-mandatory

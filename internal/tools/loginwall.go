@@ -64,5 +64,5 @@ func loginHintForKind(deps Dependencies, authKind, rawURL string) string {
 	case "cookies":
 		return "The saved login for " + site + " looks expired or was rejected. Call site_login with the site's login URL to sign in again, then retry."
 	}
-	return "This page needs a login. To read it as you, call site_login with " + site + "'s login URL, then retry."
+	return "This page needs a login. To read it as you, call site_login with " + site + "'s login URL, then retry. If the site rejects copied cookies, use use_login_window=true."
 }

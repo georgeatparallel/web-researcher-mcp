@@ -90,6 +90,9 @@ func registerScrapePage(srv *mcp.Server, deps Dependencies) {
 		// receive it). anonymous=true skips the login entirely.
 		var cookies []cookievault.Cookie
 		var lease *cookievault.ProfileLease
+		if mode == "raw" && !input.Anonymous && hasSavedProfile(ctx, deps, input.URL) {
+			return toolError("mode=raw is not available with a saved browser profile; use mode full or preview, or set anonymous=true"), nil, nil
+		}
 		if !input.Anonymous {
 			var lerr error
 			if lease, lerr = profileLeaseFor(ctx, deps, input.URL); lerr != nil {
@@ -129,10 +132,6 @@ func registerScrapePage(srv *mcp.Server, deps Dependencies) {
 		// HTML. It is handled on its own path with a distinct cache key so a
 		// raw response never collides with the cleaned full/preview cache.
 		if mode == "raw" {
-			if lease != nil {
-				profileStatus = "unsupported"
-				return toolError("mode=raw is not available with a saved browser profile; use mode full or preview, or set anonymous=true"), nil, nil
-			}
 			return scrapeRaw(ctx, deps, input, maxLength, start, authed)
 		}
 

@@ -2334,6 +2334,54 @@ class SequentialSearchResult:
         )
 
 @dataclass
+class SiteLoginResponse:
+    capturedAt: Optional[str] = None
+    cookieCount: Optional[int] = None
+    domain: Optional[str] = None
+    expiresAt: Optional[str] = None
+    kind: Optional[str] = None
+    reason: Optional[str] = None
+    source: Optional[str] = None
+    status: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "SiteLoginResponse | None":
+        if d is None:
+            return None
+        return cls(
+            capturedAt=d.get('capturedAt'),
+            cookieCount=d.get('cookieCount'),
+            domain=d.get('domain'),
+            expiresAt=d.get('expiresAt'),
+            kind=d.get('kind'),
+            reason=d.get('reason'),
+            source=d.get('source'),
+            status=d.get('status'),
+        )
+
+@dataclass
+class SiteLogoutResponse:
+    domain: Optional[str] = None
+    reason: Optional[str] = None
+    removed: Optional[bool] = None
+    removedCookies: Optional[bool] = None
+    removedProfile: Optional[bool] = None
+    status: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "SiteLogoutResponse | None":
+        if d is None:
+            return None
+        return cls(
+            domain=d.get('domain'),
+            reason=d.get('reason'),
+            removed=d.get('removed'),
+            removedCookies=d.get('removedCookies'),
+            removedProfile=d.get('removedProfile'),
+            status=d.get('status'),
+        )
+
+@dataclass
 class SizeMetadata:
     estimatedTokens: Optional[int] = None
     sizeCategory: Optional[str] = None

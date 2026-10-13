@@ -64,21 +64,11 @@ func vaultCookiesFor(ctx context.Context, deps Dependencies, rawURL string) []co
 // vaultCookiesFor: store configured, identified caller, session_capture consent.
 // ErrProfileBusy is returned so the caller can tell the agent to retry.
 func profileLeaseFor(ctx context.Context, deps Dependencies, rawURL string) (*cookievault.ProfileLease, error) {
-	if deps.ProfileStore == nil {
-		return nil, nil
-	}
-	subj, ok := vaultSubject(ctx)
+	sub, host, ok := profileTarget(ctx, deps, rawURL)
 	if !ok {
 		return nil, nil
 	}
-	if deps.Consent == nil || !deps.Consent.HasConsent(ctx, consent.PurposeSessionCapture) {
-		return nil, nil
-	}
-	u, err := url.Parse(rawURL)
-	if err != nil || u.Hostname() == "" {
-		return nil, nil
-	}
-	lease, err := deps.ProfileStore.Acquire(ctx, subj, u.Hostname())
+	lease, err := deps.ProfileStore.Acquire(ctx, sub, host)
 	if errors.Is(err, cookievault.ErrProfileBusy) {
 		return nil, err
 	}
@@ -86,6 +76,33 @@ func profileLeaseFor(ctx context.Context, deps Dependencies, rawURL string) (*co
 		return nil, nil // none, expired or unreadable: scrape anonymously
 	}
 	return lease, nil
+}
+
+// hasSavedProfile reports whether profileLeaseFor would find a profile, without
+// waiting for or unpacking it.
+func hasSavedProfile(ctx context.Context, deps Dependencies, rawURL string) bool {
+	sub, host, ok := profileTarget(ctx, deps, rawURL)
+	return ok && deps.ProfileStore.Has(sub, host)
+}
+
+// profileTarget applies the guards shared by every profile lookup: store
+// configured, identified caller, session_capture consent, parseable URL.
+func profileTarget(ctx context.Context, deps Dependencies, rawURL string) (cookievault.Subject, string, bool) {
+	if deps.ProfileStore == nil {
+		return cookievault.Subject{}, "", false
+	}
+	subj, ok := vaultSubject(ctx)
+	if !ok {
+		return cookievault.Subject{}, "", false
+	}
+	if deps.Consent == nil || !deps.Consent.HasConsent(ctx, consent.PurposeSessionCapture) {
+		return cookievault.Subject{}, "", false
+	}
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Hostname() == "" {
+		return cookievault.Subject{}, "", false
+	}
+	return subj, u.Hostname(), true
 }
 
 // recordSiteSession counts one saved-login event in Prometheus.
@@ -121,7 +138,7 @@ func registerSiteLogin(srv *mcp.Server, deps Dependencies) {
 		subj, ok := vaultSubject(ctx)
 		if !ok {
 			auditToolDenial(ctx, deps, "site_login", time.Since(start), "unauthenticated")
-			return structuredResult(mustJSON(map[string]any{"status": "unavailable", "reason": "site_login requires an identified user"})), nil, nil
+			return structuredResult(mustJSON(map[string]any{"status": "unavailable", "reason": "site_login needs to know who you are. Over STDIO set STDIO_USER_ID; over HTTP sign in with OAuth."})), nil, nil
 		}
 		if deps.Consent == nil || !deps.Consent.HasConsent(ctx, consent.PurposeSessionCapture) {
 			auditToolDenial(ctx, deps, "site_login", time.Since(start), "no_consent")
@@ -232,7 +249,7 @@ func registerSiteLogout(srv *mcp.Server, deps Dependencies) {
 		subj, ok := vaultSubject(ctx)
 		if !ok {
 			auditToolDenial(ctx, deps, "site_logout", time.Since(start), "unauthenticated")
-			return structuredResult(mustJSON(map[string]any{"status": "unavailable", "reason": "site_logout requires an identified user"})), nil, nil
+			return structuredResult(mustJSON(map[string]any{"status": "unavailable", "reason": "site_logout needs to know who you are. Over STDIO set STDIO_USER_ID; over HTTP sign in with OAuth."})), nil, nil
 		}
 		removedCookies, err := deps.CookieVault.Delete(ctx, subj, host)
 		removedProfile := false
@@ -273,6 +290,9 @@ func siteHost(s string) string {
 			return ""
 		}
 		return u.Hostname()
+	}
+	if i := strings.IndexAny(s, "/?#"); i >= 0 {
+		s = s[:i] // scheme-less input such as "linkedin.com/feed"
 	}
 	return strings.TrimSuffix(strings.ToLower(s), ".")
 }
