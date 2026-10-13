@@ -403,16 +403,16 @@ func (l *ProfileLease) Discard() { l.once.Do(l.end) }
 // removeDir deletes a work dir, retrying briefly: Chrome helper processes can
 // still write for a moment after the debug port closes, which fails the first
 // RemoveAll with "directory not empty". The dir holds plaintext cookies, so a
-// final failure is logged (without the path) and the stale-dir sweep retries.
+// final failure is logged without the error (it embeds the path) and the
+// stale-dir sweep retries.
 func removeDir(dir string) {
-	var err error
 	for i := 0; i < 20; i++ {
-		if err = os.RemoveAll(dir); err == nil {
+		if os.RemoveAll(dir) == nil {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	slog.Warn("could not remove browser work dir; the next sweep will retry", "error", err)
+	slog.Warn("could not remove a temporary browser folder; the next sweep will retry")
 }
 
 func (l *ProfileLease) end() {
