@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +32,12 @@ type Config struct {
 	CookieVaultTTL        time.Duration // max lifetime of any stored cookie bundle
 	MaxConcurrentCaptures int           // simultaneous headed login captures
 	CookieCaptureTimeout  time.Duration // how long a site_login window may stay open
+	// CookieVaultProfileTTL is the absolute lifetime of a saved browser profile
+	// (COOKIE_VAULT_PROFILE_TTL, issue #775).
+	CookieVaultProfileTTL time.Duration
+	// CookieCaptureInHTTP lets site_login run in HTTP mode, where the login
+	// window opens on the server's own display (COOKIE_CAPTURE_IN_HTTP, #775).
+	CookieCaptureInHTTP bool
 	// CookieVaultStdioConsent is the operator's explicit opt-in to record the
 	// session_capture consent for STDIO_USER_ID at startup (COOKIE_VAULT_STDIO_CONSENT).
 	// Honored only with the vault enabled, in STDIO mode, with a valid STDIO_USER_ID.
@@ -398,6 +405,7 @@ func Load() (*Config, error) {
 	cookieVaultTTL := envDuration("COOKIE_VAULT_TTL", maxCookieVaultTTLDefault)
 	maxCaptures := envInt("MAX_CONCURRENT_CAPTURES", 1)
 	captureTimeout := envDuration("COOKIE_CAPTURE_TIMEOUT", 5*time.Minute)
+	profileTTL := envDuration("COOKIE_VAULT_PROFILE_TTL", defaultProfileTTL)
 	if cookieVaultEnabled {
 		switch {
 		case cookieVaultKey == "":
@@ -409,6 +417,9 @@ func Load() (*Config, error) {
 		}
 		if cookieVaultTTL <= 0 || cookieVaultTTL > maxCookieVaultTTL {
 			errs = append(errs, "COOKIE_VAULT_TTL must be between 1s and 720h")
+		}
+		if profileTTL <= 0 || profileTTL > maxCookieVaultTTL {
+			errs = append(errs, "COOKIE_VAULT_PROFILE_TTL must be between 1s and 720h")
 		}
 		if maxCaptures < 1 || maxCaptures > 5 {
 			errs = append(errs, "MAX_CONCURRENT_CAPTURES must be between 1 and 5")
@@ -493,6 +504,21 @@ func Load() (*Config, error) {
 	if cookieVaultStdioConsent && (!cookieVaultEnabled || stdioUserID == "") {
 		warnings = append(warnings, "COOKIE_VAULT_STDIO_CONSENT is ignored: it needs COOKIE_VAULT_ENABLED=true, STDIO mode (no PORT) and a valid STDIO_USER_ID.")
 		cookieVaultStdioConsent = false
+	}
+
+	// COOKIE_CAPTURE_IN_HTTP (#775): site_login in HTTP mode opens a visible
+	// window on the server host, so it needs the vault, HTTP mode and a display.
+	// Never defaulted on; ignored (with a warning) unless it can take effect.
+	cookieCaptureInHTTP := envBool("COOKIE_CAPTURE_IN_HTTP", false)
+	if cookieCaptureInHTTP {
+		switch {
+		case !cookieVaultEnabled:
+			warnings = append(warnings, "COOKIE_CAPTURE_IN_HTTP is ignored: it needs COOKIE_VAULT_ENABLED=true.")
+			cookieCaptureInHTTP = false
+		case !hasDisplay():
+			warnings = append(warnings, "COOKIE_CAPTURE_IN_HTTP is ignored: this host has no display (set DISPLAY or WAYLAND_DISPLAY). Run site_login from a STDIO session instead.")
+			cookieCaptureInHTTP = false
+		}
 	}
 
 	// AUDIT_RETENTION_DAYS: 0 disables cleanup; any other value is clamped to
@@ -587,6 +613,8 @@ func Load() (*Config, error) {
 		CookieVaultTTL:          cookieVaultTTL,
 		MaxConcurrentCaptures:   maxCaptures,
 		CookieCaptureTimeout:    captureTimeout,
+		CookieVaultProfileTTL:   profileTTL,
+		CookieCaptureInHTTP:     cookieCaptureInHTTP,
 		CookieVaultStdioConsent: cookieVaultStdioConsent,
 		CacheIsolation:          envOrDefault("CACHE_ISOLATION", "shared"),
 		RedisURL:                os.Getenv("REDIS_URL"),
@@ -750,7 +778,22 @@ func envBool(key string, fallback bool) bool {
 const (
 	maxCookieVaultTTLDefault = 24 * time.Hour
 	maxCookieVaultTTL        = 30 * 24 * time.Hour
+	// Saved browser profile lifetime: a week, because a profile is signed in
+	// once and reused (issue #775).
+	defaultProfileTTL = 7 * 24 * time.Hour
 )
+
+// hostGOOS is runtime.GOOS; a variable so tests can pose as another OS.
+var hostGOOS = runtime.GOOS
+
+// hasDisplay reports whether a visible browser window can open on this host.
+// macOS and Windows always have one; Linux needs an X11 or Wayland session.
+func hasDisplay() bool {
+	if hostGOOS != "linux" {
+		return true
+	}
+	return os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != ""
+}
 
 func isHex64(s string) bool {
 	if len(s) != 64 {

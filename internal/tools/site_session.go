@@ -16,7 +16,7 @@ import (
 
 type siteLoginInput struct {
 	URL            string `json:"url" jsonschema:"The login page URL (http or https) of the site you want scrape_page to read while signed in.,required"`
-	UseLoginWindow bool   `json:"use_login_window,omitempty" jsonschema:"Set true only if you do not use Chrome, Edge or Brave, or cannot turn on remote debugging. Opens a separate visible window with a fresh profile where you sign in by hand, then close the window. Default false: read the existing signed-in session from your own browser."`
+	UseLoginWindow bool   `json:"use_login_window,omitempty" jsonschema:"Opens a separate visible browser window where you sign in by hand, then close the window. The sign-in is saved in a private browser profile that scrape_page reuses. Use it for LinkedIn and other sites that reject copied cookies, if you do not use Chrome, Edge or Brave, or cannot turn on remote debugging. Always used over HTTP. Default false: read the existing signed-in session from your own browser (STDIO only)."`
 }
 
 type siteLogoutInput struct {
@@ -59,6 +59,42 @@ func vaultCookiesFor(ctx context.Context, deps Dependencies, rawURL string) []co
 	return b.Cookies
 }
 
+// profileLeaseFor leases the caller's saved browser profile for rawURL's site.
+// It returns (nil, nil) when there is none to use, under the same gates as
+// vaultCookiesFor: store configured, identified caller, session_capture consent.
+// ErrProfileBusy is returned so the caller can tell the agent to retry.
+func profileLeaseFor(ctx context.Context, deps Dependencies, rawURL string) (*cookievault.ProfileLease, error) {
+	if deps.ProfileStore == nil {
+		return nil, nil
+	}
+	subj, ok := vaultSubject(ctx)
+	if !ok {
+		return nil, nil
+	}
+	if deps.Consent == nil || !deps.Consent.HasConsent(ctx, consent.PurposeSessionCapture) {
+		return nil, nil
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Hostname() == "" {
+		return nil, nil
+	}
+	lease, err := deps.ProfileStore.Acquire(ctx, subj, u.Hostname())
+	if errors.Is(err, cookievault.ErrProfileBusy) {
+		return nil, err
+	}
+	if err != nil {
+		return nil, nil // none, expired or unreadable: scrape anonymously
+	}
+	return lease, nil
+}
+
+// recordSiteSession counts one saved-login event in Prometheus.
+func recordSiteSession(deps Dependencies, event, kind, status string) {
+	if deps.Metrics != nil {
+		deps.Metrics.RecordSiteSession(event, kind, status)
+	}
+}
+
 // registerSiteLogin registers the WRITE tool that captures a login (#241). A
 // human signs in inside a visible browser; only the resulting cookies are kept,
 // encrypted, for scrape_page. Consent-gated on the session_capture purpose.
@@ -66,14 +102,14 @@ func registerSiteLogin(srv *mcp.Server, deps Dependencies) {
 	addTool(srv, &mcp.Tool{
 		Name: "site_login",
 		Description: "Sign in to a website so scrape_page can read pages that need a login. " +
-			"By default it reads the site's cookies from your own running, already signed-in Chrome, Edge or Brave: turn on remote debugging once (chrome://inspect/#remote-debugging), call this tool, and click Allow in the browser. It reads only that one site's cookies, disconnects, and never closes your browser. " +
-			"If the browser is not reachable or you are not signed in to the site there, the result is a status (browser_unavailable or not_signed_in) with the steps to fix it; no window is opened. " +
-			"For other browsers, or if you cannot enable remote debugging, call it again with use_login_window=true: a separate visible window with a fresh profile opens on the URL; you sign in by hand (including 2FA or CAPTCHA) and close the window. " +
-			"The result's source says which path was used (browser or login_window). Only cookies are saved, never your password. Cookies are stored encrypted, scoped to that site's registrable domain, " +
-			"sent only to that site by scrape_page, expire on a short default TTL, and can be removed any time with site_logout or the data-subject erasure endpoint. " +
+			"Two ways. Default (STDIO only): reads the site's cookies from your own running, already signed-in Chrome, Edge or Brave. Turn on remote debugging once (chrome://inspect/#remote-debugging), call this tool, and click Allow. It reads only that one site's cookies, disconnects, and never closes your browser. " +
+			"With use_login_window=true (always used over HTTP, where the window opens on the machine running the server): a separate visible browser opens on the URL; you sign in by hand (including 2FA or CAPTCHA) and close the window. The sign-in is saved as an encrypted private browser profile that scrape_page reopens headless. Use this for LinkedIn and other sites that reject copied cookies. " +
+			"If the browser is not reachable or you are not signed in there, the result is a status (browser_unavailable or not_signed_in) with the steps to fix it; no window is opened. If the site did not keep the sign-in (for example you did not tick 'remember me'), the result is profile_not_saved and nothing is stored. " +
+			"The result's kind says what was saved (cookies or profile) and source says which path was used (browser or login_window). A new login replaces an older one for the same site. Only cookies and the browser profile are saved, never your password. Everything is stored encrypted, scoped to that site's registrable domain, " +
+			"used only for that site by scrape_page, expires on a short default TTL, and can be removed any time with site_logout or the data-subject erasure endpoint. " +
 			"Blocks until the cookies are read, you close the login window, or the capture timeout passes (then nothing is saved). " +
 			"Opt-in and consent-gated: requires the 'session_capture' consent purpose, which is never granted by default (the operator must opt in explicitly). " +
-			"Use only on accounts and sites whose terms of service allow automated access on your behalf; you are responsible for that.",
+			"Use only on accounts and sites whose terms of service allow automated access on your behalf; you are responsible for that. Some sites, such as LinkedIn, forbid it.",
 		Annotations:  writeAnnotations(false),
 		OutputSchema: siteLoginOutputSchema,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input siteLoginInput) (*mcp.CallToolResult, any, error) {
@@ -92,35 +128,64 @@ func registerSiteLogin(srv *mcp.Server, deps Dependencies) {
 			return structuredResult(mustJSON(map[string]any{"status": "no_consent", "reason": "no recorded consent for the 'session_capture' purpose; nothing is captured. In STDIO the operator grants it by setting COOKIE_VAULT_STDIO_CONSENT=true"})), nil, nil
 		}
 
-		domain, cookies, src, err := deps.CookieCapturer.CaptureWithSource(ctx, input.URL, input.UseLoginWindow)
+		// Over HTTP there is no browser to attach to, so the window is the only path.
+		if input.UseLoginWindow || !deps.CookieCapturer.CanAttach() {
+			sum, err := deps.CookieCapturer.LoginWindow(ctx, subj, input.URL)
+			if err != nil {
+				return siteLoginFailure(ctx, deps, start, "profile", err), nil, nil
+			}
+			// One login per site: drop an older copied-cookie bundle so scrape_page
+			// cannot mix the two.
+			_, _ = deps.CookieVault.Delete(ctx, subj, sum.Domain)
+			siteLoginDone(ctx, deps, start, "profile", sum.Domain)
+			return structuredResult(mustJSON(map[string]any{
+				"status": "ok", "kind": "profile", "domain": sum.Domain,
+				"capturedAt": sum.CreatedAt, "expiresAt": sum.ExpiresAt, "source": string(cookievault.SourceLoginWindow),
+			})), nil, nil
+		}
+
+		domain, cookies, err := deps.CookieCapturer.CaptureFromBrowser(ctx, input.URL)
 		if err != nil {
-			return siteLoginFailure(ctx, deps, start, err), nil, nil
+			return siteLoginFailure(ctx, deps, start, "cookies", err), nil, nil
 		}
 		sum, err := deps.CookieVault.Put(ctx, subj, domain, cookies)
 		if err != nil {
 			if errors.Is(err, cookievault.ErrNoCookies) {
-				return siteLoginFailure(ctx, deps, start, cookievault.ErrNothingCaptured), nil, nil
+				return siteLoginFailure(ctx, deps, start, "cookies", cookievault.ErrNothingCaptured), nil, nil
 			}
 			recordToolCall(deps, "site_login", time.Since(start), err, "upstream_error", false)
 			auditToolCall(ctx, deps, "site_login", time.Since(start), err, "upstream_error")
+			recordSiteSession(deps, "login", "cookies", "failed")
 			return toolError("could not save the login: " + err.Error()), nil, nil
 		}
-		recordToolCall(deps, "site_login", time.Since(start), nil, "", false)
-		auditToolCall(ctx, deps, "site_login", time.Since(start), nil, "")
+		if deps.ProfileStore != nil {
+			_, _ = deps.ProfileStore.Delete(ctx, subj, domain)
+		}
+		siteLoginDone(ctx, deps, start, "cookies", sum.Domain)
 		return structuredResult(mustJSON(map[string]any{
-			"status": "ok", "domain": sum.Domain, "cookieCount": sum.CookieCount,
-			"capturedAt": sum.CapturedAt, "expiresAt": sum.ExpiresAt, "source": string(src),
+			"status": "ok", "kind": "cookies", "domain": sum.Domain, "cookieCount": sum.CookieCount,
+			"capturedAt": sum.CapturedAt, "expiresAt": sum.ExpiresAt, "source": string(cookievault.SourceBrowser),
 		})), nil, nil
 	})
 }
 
+// siteLoginDone records a saved login in metrics and the audit trail. The audit
+// event carries the kind and the registrable domain, never cookie or profile content.
+func siteLoginDone(ctx context.Context, deps Dependencies, start time.Time, kind, domain string) {
+	recordToolCall(deps, "site_login", time.Since(start), nil, "", false)
+	auditToolCallQuery(ctx, deps, "site_login", time.Since(start), nil, "", "", map[string]any{"kind": kind, "domain": domain})
+	recordSiteSession(deps, "login", kind, "ok")
+}
+
 // siteLoginFailure maps a capture error to a tool result and records the call.
 // Messages are fixed strings: no URL query, cookie or upstream detail is echoed.
-func siteLoginFailure(ctx context.Context, deps Dependencies, start time.Time, err error) *mcp.CallToolResult {
+func siteLoginFailure(ctx context.Context, deps Dependencies, start time.Time, kind string, err error) *mcp.CallToolResult {
 	status, msg := "failed", "login capture failed"
 	switch {
 	case errors.Is(err, cookievault.ErrCaptureBusy):
 		status, msg = "busy", "another login window is already open; close it and try again"
+	case errors.Is(err, cookievault.ErrProfileBusy):
+		status, msg = "busy", "a scrape or login is using this site's saved browser profile; try again in a minute"
 	case errors.Is(err, cookievault.ErrCaptureTimeout):
 		status, msg = "timeout", "the login window was not closed in time; nothing was saved"
 	case errors.Is(err, cookievault.ErrInvalidLoginURL):
@@ -130,12 +195,23 @@ func siteLoginFailure(ctx context.Context, deps Dependencies, start time.Time, e
 	case errors.Is(err, cookievault.ErrNotSignedIn):
 		status, msg = "not_signed_in", "your browser has no cookies for that site. Sign in to the site in that browser, then call site_login again. To sign in in a separate window instead, call site_login with use_login_window=true"
 	case errors.Is(err, cookievault.ErrNothingCaptured):
-		status, msg = "nothing_captured", "no cookies were captured for that site; nothing was saved"
+		status, msg = "nothing_captured", "no cookies were captured for that site; nothing was saved. Sign in before you close the window"
+	case errors.Is(err, cookievault.ErrProfileNotSaved):
+		status, msg = "profile_not_saved", "the site did not keep your sign-in, so a later scrape would not be signed in; nothing was saved. Sign in again and tick 'remember me' or 'stay signed in' if the site offers it"
+	case errors.Is(err, cookievault.ErrBrowserLaunch):
+		status, msg = "browser_launch_failed", "could not start a browser. Install Chrome, Edge or Brave, or set CHROME_PATH"
+	case errors.Is(err, cookievault.ErrTooManyProfiles):
+		status, msg = "too_many_profiles", "too many sites have a saved sign-in; call site_logout for one you no longer need"
+	case errors.Is(err, cookievault.ErrProfileTooLarge):
+		status, msg = "profile_too_large", "the browser profile is too large to store; nothing was saved"
+	case errors.Is(err, cookievault.ErrProfilesUnavailable):
+		status, msg = "profiles_unavailable", "saved browser profiles are not available on this server"
 	case errors.Is(err, cookievault.ErrLoginURLRejected):
 		status, msg = "blocked", "that host is not allowed (private or internal address)"
 	}
 	recordToolCall(deps, "site_login", time.Since(start), err, "capture_"+status, false)
-	auditToolCall(ctx, deps, "site_login", time.Since(start), errors.New(status), "capture_"+status)
+	auditToolCallQuery(ctx, deps, "site_login", time.Since(start), errors.New(status), "capture_"+status, "", map[string]any{"kind": kind})
+	recordSiteSession(deps, "login", kind, status)
 	return structuredResult(mustJSON(map[string]any{"status": status, "reason": msg}))
 }
 
@@ -144,7 +220,7 @@ func siteLoginFailure(ctx context.Context, deps Dependencies, start time.Time, e
 func registerSiteLogout(srv *mcp.Server, deps Dependencies) {
 	addTool(srv, &mcp.Tool{
 		Name:         "site_logout",
-		Description:  "Forget the saved login for a site (saved earlier with site_login): deletes the stored cookies for that site's registrable domain. Idempotent: reports removed=false when nothing was saved. Scrapes made with a saved login are never cached, so there is no cached page content to clear. Needs no consent.",
+		Description:  "Forget the saved login for a site (saved earlier with site_login): deletes the stored cookies and the saved browser profile for that site's registrable domain. Idempotent: reports removed=false when nothing was saved. removedCookies and removedProfile say which were deleted. Scrapes made with a saved login are never cached, so there is no cached page content to clear. Needs no consent.",
 		Annotations:  writeAnnotations(true),
 		OutputSchema: siteLogoutOutputSchema,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input siteLogoutInput) (*mcp.CallToolResult, any, error) {
@@ -158,19 +234,29 @@ func registerSiteLogout(srv *mcp.Server, deps Dependencies) {
 			auditToolDenial(ctx, deps, "site_logout", time.Since(start), "unauthenticated")
 			return structuredResult(mustJSON(map[string]any{"status": "unavailable", "reason": "site_logout requires an identified user"})), nil, nil
 		}
-		removed, err := deps.CookieVault.Delete(ctx, subj, host)
+		removedCookies, err := deps.CookieVault.Delete(ctx, subj, host)
+		removedProfile := false
+		if err == nil && deps.ProfileStore != nil {
+			removedProfile, err = deps.ProfileStore.Delete(ctx, subj, host)
+		}
 		if err != nil {
 			if errors.Is(err, cookievault.ErrInvalidDomain) {
 				return toolError("that host has no registrable domain"), nil, nil
 			}
 			recordToolCall(deps, "site_logout", time.Since(start), err, "upstream_error", false)
 			auditToolCall(ctx, deps, "site_logout", time.Since(start), err, "upstream_error")
+			recordSiteSession(deps, "logout", "any", "failed")
 			return upstreamErrorResponse("site_logout", err), nil, nil
 		}
+		domain := cookievault.RegistrableDomain(host)
 		recordToolCall(deps, "site_logout", time.Since(start), nil, "", false)
-		auditToolCall(ctx, deps, "site_logout", time.Since(start), nil, "")
+		auditToolCallQuery(ctx, deps, "site_logout", time.Since(start), nil, "", "", map[string]any{
+			"domain": domain, "removedCookies": removedCookies, "removedProfile": removedProfile,
+		})
+		recordSiteSession(deps, "logout", "any", "ok")
 		return structuredResult(mustJSON(map[string]any{
-			"status": "ok", "domain": cookievault.RegistrableDomain(host), "removed": removed,
+			"status": "ok", "domain": domain, "removed": removedCookies || removedProfile,
+			"removedCookies": removedCookies, "removedProfile": removedProfile,
 		})), nil, nil
 	})
 }

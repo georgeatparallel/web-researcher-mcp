@@ -218,6 +218,7 @@ func main() {
 	// than falling back to plaintext or memory.
 	var cookieVault cookievault.Store
 	var cookieCapturer *cookievault.Capturer
+	var profileStore *cookievault.ProfileStore
 	if cfg.Features.CookieVault {
 		kv, kerr := persist.NewDiskStore(filepath.Join(cfg.CacheDir, "cookievault"), cfg.CookieVaultKey, "")
 		if kerr != nil {
@@ -226,17 +227,31 @@ func main() {
 			cv := cookievault.NewPersistStore(kv, cfg.CookieVaultTTL)
 			cookieVault = cv
 			dataSubjects.Register("cookie_vault", cookievault.AsDataSubject(cv), cookievault.AsDataSubject(cv))
-			// Headed login capture needs a local display, so it exists in STDIO
-			// mode only. HTTP serves the vault for scraping and erasure, never capture.
-			if cfg.Port == 0 && cfg.ChromePath != "disabled" {
+			// Saved browser profiles (issue #775): same key and consent as the vault,
+			// own encrypted store, own TTL.
+			ps, perr := cookievault.NewProfileStore(filepath.Join(cfg.CacheDir, "profiles"), cfg.CookieVaultKey, cfg.CookieVaultProfileTTL)
+			if perr != nil {
+				logger.Error("saved browser profiles disabled: encrypted store unavailable", "err", perr)
+			} else {
+				profileStore = ps
+				dataSubjects.Register("cookie_vault_profiles", cookievault.AsProfileDataSubject(ps), cookievault.AsProfileDataSubject(ps))
+			}
+			// The login window needs a display on the machine running the server, so
+			// HTTP mode opens it only when the operator sets COOKIE_CAPTURE_IN_HTTP.
+			// Reading the user's own running browser is STDIO only: over HTTP the
+			// browser would be the server's, not the caller's.
+			if (cfg.Port == 0 || cfg.CookieCaptureInHTTP) && cfg.ChromePath != "disabled" {
 				allowPrivate := cfg.AllowPrivateIPs
 				cookieCapturer = cookievault.NewCapturer(
 					cookievault.NewRodDriver(cfg.ChromePath),
 					func(ctx context.Context, host string) error { return scraper.ValidateHost(ctx, host, allowPrivate) },
 					cfg.MaxConcurrentCaptures, cfg.CookieCaptureTimeout).
-					WithAttacher(cookievault.NewRodAttacher(time.Minute))
+					WithProfiles(profileStore)
+				if cfg.Port == 0 {
+					cookieCapturer.WithAttacher(cookievault.NewRodAttacher(time.Minute))
+				}
 			}
-			logger.Info("cookie vault enabled", "consent", "required", "ttl", cfg.CookieVaultTTL, "capture", cookieCapturer != nil)
+			logger.Info("cookie vault enabled", "consent", "required", "ttl", cfg.CookieVaultTTL, "capture", cookieCapturer != nil, "profiles", profileStore != nil)
 		}
 	}
 
@@ -583,6 +598,7 @@ func main() {
 		Consent:                consentManager,
 		CookieVault:            cookieVault,
 		CookieCapturer:         cookieCapturer,
+		ProfileStore:           profileStore,
 		UserAnalytics:          userAnalytics,
 		Memory:                 memoryStore,
 		Workspaces:             workspaceStore,

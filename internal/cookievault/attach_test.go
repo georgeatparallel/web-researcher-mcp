@@ -202,19 +202,19 @@ func TestCapturerPrefersBrowserAttach(t *testing.T) {
 	drv := &fakeDriver{}
 	att := &fakeAttacher{cookies: []Cookie{{Name: "li_at", Value: "x", Domain: ".linkedin.com", Path: "/"}}}
 	c := NewCapturer(drv, nil, 1, time.Second).WithAttacher(att)
-	domain, cookies, src, err := c.CaptureWithSource(context.Background(), "https://www.linkedin.com/login", false)
+	domain, cookies, err := c.CaptureFromBrowser(context.Background(), "https://www.linkedin.com/login")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if domain != "linkedin.com" || len(cookies) != 1 || src != SourceBrowser {
-		t.Fatalf("got %q %d %q", domain, len(cookies), src)
+	if domain != "linkedin.com" || len(cookies) != 1 {
+		t.Fatalf("got %q %d", domain, len(cookies))
 	}
 	if drv.opens != 0 {
 		t.Fatal("login window opened although the browser attach worked")
 	}
 }
 
-func TestCapturerDefaultNeverOpensWindow(t *testing.T) {
+func TestCaptureFromBrowserNeverOpensWindow(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
 		att  Attacher
@@ -229,38 +229,22 @@ func TestCapturerDefaultNeverOpensWindow(t *testing.T) {
 		if tc.att != nil {
 			c = c.WithAttacher(tc.att)
 		}
-		_, cookies, _, err := c.CaptureWithSource(context.Background(), "https://www.linkedin.com/login", false)
+		_, cookies, err := c.CaptureFromBrowser(context.Background(), "https://www.linkedin.com/login")
 		if !errors.Is(err, tc.want) || len(cookies) != 0 {
 			t.Errorf("%s: got %d cookies, err %v, want %v", name, len(cookies), err, tc.want)
 		}
 		if drv.opens != 0 {
-			t.Errorf("%s: login window opened without use_login_window", name)
+			t.Errorf("%s: login window opened", name)
 		}
 	}
 }
 
-func TestCapturerWindowModeSkipsAttach(t *testing.T) {
-	t.Parallel()
-	sess := newFakeSession(Cookie{Name: "sid", Value: "x", Domain: "linkedin.com", Path: "/"})
-	sess.userClosesWindow()
-	drv := &fakeDriver{sess: sess}
-	att := &fakeAttacher{cookies: []Cookie{{Name: "a", Value: "b", Domain: "linkedin.com", Path: "/"}}}
-	c := NewCapturer(drv, nil, 1, time.Second).WithAttacher(att)
-	_, cookies, src, err := c.CaptureWithSource(context.Background(), "https://www.linkedin.com/login", true)
-	if err != nil || len(cookies) != 1 || src != SourceLoginWindow {
-		t.Fatalf("got %d %q %v", len(cookies), src, err)
-	}
-	if att.calls != 0 || drv.opens != 1 {
-		t.Fatalf("attach calls %d, window opens %d", att.calls, drv.opens)
-	}
-}
-
-func TestCapturerSkipsAttachForRejectedHost(t *testing.T) {
+func TestCaptureFromBrowserSkipsRejectedHost(t *testing.T) {
 	t.Parallel()
 	att := &fakeAttacher{cookies: []Cookie{{Name: "a", Value: "b", Domain: "x.com", Path: "/"}}}
 	deny := func(context.Context, string) error { return errors.New("private") }
 	c := NewCapturer(&fakeDriver{}, deny, 1, time.Second).WithAttacher(att)
-	if _, _, _, err := c.CaptureWithSource(context.Background(), "https://x.com/", false); !errors.Is(err, ErrLoginURLRejected) {
+	if _, _, err := c.CaptureFromBrowser(context.Background(), "https://x.com/"); !errors.Is(err, ErrLoginURLRejected) {
 		t.Fatalf("err = %v", err)
 	}
 	if att.calls != 0 {

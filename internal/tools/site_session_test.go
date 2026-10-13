@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -54,6 +56,16 @@ func (d *fakeLoginDriver) Open(_ context.Context, _, _ string) (cookievault.Sess
 	close(done)
 	return &fakeLoginSession{cookies: append([]cookievault.Cookie(nil), d.cookies...), done: done}, nil
 }
+
+// ReadCookies returns what the browser would hold after a restart: the same
+// cookies, as if the site wrote them to disk.
+func (d *fakeLoginDriver) ReadCookies(context.Context, string) ([]cookievault.Cookie, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]cookievault.Cookie(nil), d.cookies...), nil
+}
+
+func (d *fakeLoginDriver) BrowserBin() string { return "/fake/chrome" }
 
 func (d *fakeLoginDriver) openCount() int {
 	d.mu.Lock()
@@ -247,11 +259,24 @@ type vaultEnv struct {
 	consent *consent.StoreManager
 	auditor *capturingAuditor
 	logs    *bytes.Buffer
+	profDir string
 }
 
 func canaryCookies() []cookievault.Cookie {
 	return []cookievault.Cookie{{Name: "sid", Value: canaryValue, Domain: "." + vaultTestDomain, Path: "/", HTTPOnly: true}}
 }
+
+// persistentCanaryCookies is canaryCookies with an expiry, as a site writes a
+// "remember me" sign-in: only these reach the browser profile on disk.
+func persistentCanaryCookies() []cookievault.Cookie {
+	cs := canaryCookies()
+	for i := range cs {
+		cs[i].Expires = time.Now().Add(24 * time.Hour)
+	}
+	return cs
+}
+
+const profileTestKey = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 
 func newVaultEnv(t *testing.T) *vaultEnv {
 	t.Helper()
@@ -259,10 +284,15 @@ func newVaultEnv(t *testing.T) *vaultEnv {
 	e := &vaultEnv{
 		site:    newLoginSite(t),
 		cache:   newMapCache(),
-		driver:  &fakeLoginDriver{cookies: canaryCookies()},
+		driver:  &fakeLoginDriver{cookies: persistentCanaryCookies()},
 		consent: consent.NewStoreManager(persist.NewMemoryStore()),
 		auditor: &capturingAuditor{},
 		logs:    &bytes.Buffer{},
+	}
+	e.profDir = filepath.Join(t.TempDir(), "profiles")
+	profiles, err := cookievault.NewProfileStore(e.profDir, profileTestKey, time.Hour)
+	if err != nil {
+		t.Fatal(err)
 	}
 	e.deps = Dependencies{
 		Cache:   e.cache,
@@ -278,7 +308,8 @@ func newVaultEnv(t *testing.T) *vaultEnv {
 		Logger:         slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Consent:        e.consent,
 		CookieVault:    cookievault.NewPersistStore(persist.NewMemoryStore(), time.Hour),
-		CookieCapturer: cookievault.NewCapturer(e.driver, nil, 1, time.Minute),
+		ProfileStore:   profiles,
+		CookieCapturer: cookievault.NewCapturer(e.driver, nil, 1, time.Minute).WithProfiles(profiles),
 	}
 	return e
 }
@@ -296,6 +327,30 @@ func (e *vaultEnv) grant(t *testing.T, tenant, user string) {
 func (e *vaultEnv) seed(t *testing.T, tenant, user string) {
 	t.Helper()
 	if _, err := e.deps.CookieVault.Put(context.Background(), cookievault.Subject{TenantID: tenant, UserID: user}, vaultTestDomain, canaryCookies()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedProfile stores a saved browser profile for the subject on vaulttest.com. It
+// uses its own store instance, so the env's store sees it as already on disk.
+func (e *vaultEnv) seedProfile(t *testing.T, tenant, user string) {
+	t.Helper()
+	seed, err := cookievault.NewProfileStore(e.profDir, profileTestKey, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := seed.Begin(context.Background(), cookievault.Subject{TenantID: tenant, UserID: user}, vaultTestDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(l.Dir, "Default"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(l.Dir, "Default", "Cookies"), []byte("profile-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l.Meta.Browser = "/fake/chrome"
+	if _, err := l.Commit(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -379,23 +434,38 @@ func TestAnonymousAfterAuthenticatedNeverServedFromCache(t *testing.T) {
 func TestCanaryCookieNeverLeaks(t *testing.T) {
 	e := newVaultEnv(t)
 	e.grant(t, "default", "alice")
+	e.seed(t, "default", "alice")
 	sess := e.client(t, "default", "alice")
+	subj := datasubject.Subject{TenantID: "default", UserID: "alice"}
 
 	var surfaces []string
-	_, text := callVaultTool(t, sess, "site_login", map[string]any{"url": "http://" + vaultTestHost + "/login", "use_login_window": true})
-	surfaces = append(surfaces, text)
-	_, text = callVaultTool(t, sess, "scrape_page", map[string]any{"url": e.site.pageURL()})
+	_, text := callVaultTool(t, sess, "scrape_page", map[string]any{"url": e.site.pageURL()})
 	surfaces = append(surfaces, text)
 	_, text = callVaultTool(t, sess, "scrape_page", map[string]any{"url": e.site.pageURL(), "mode": "raw"})
 	surfaces = append(surfaces, text)
-
-	// Data-subject export and every audit event and log line.
-	exp, err := cookievault.AsDataSubject(e.deps.CookieVault).ExportSubject(context.Background(), datasubject.Subject{TenantID: "default", UserID: "alice"})
-	if err != nil || exp == nil {
-		t.Fatalf("export = %v, %v; want a summary", exp, err)
+	if !e.site.sawCookie() {
+		t.Fatal("test is vacuous: the origin never received the session cookie")
 	}
-	b, _ := json.Marshal(exp)
-	surfaces = append(surfaces, string(b))
+
+	// The login window saves a profile; its cookies are the canary too.
+	_, text = callVaultTool(t, sess, "site_login", map[string]any{"url": "http://" + vaultTestHost + "/login", "use_login_window": true})
+	surfaces = append(surfaces, text)
+
+	// Data-subject exports and every audit event and log line.
+	for name, ex := range map[string]datasubject.Exporter{
+		"cookies":  cookievault.AsDataSubject(e.deps.CookieVault),
+		"profiles": cookievault.AsProfileDataSubject(e.deps.ProfileStore),
+	} {
+		if name == "cookies" {
+			continue // the window login replaced the bundle; profiles are exported below
+		}
+		exp, err := ex.ExportSubject(context.Background(), subj)
+		if err != nil || exp == nil {
+			t.Fatalf("%s export = %v, %v; want a summary", name, exp, err)
+		}
+		b, _ := json.Marshal(exp)
+		surfaces = append(surfaces, string(b))
+	}
 	e.auditor.mu.Lock()
 	for _, ev := range e.auditor.events {
 		eb, _ := json.Marshal(ev)
@@ -407,9 +477,6 @@ func TestCanaryCookieNeverLeaks(t *testing.T) {
 	_, text = callVaultTool(t, sess, "site_logout", map[string]any{"domain": vaultTestHost})
 	surfaces = append(surfaces, text)
 
-	if !e.site.sawCookie() {
-		t.Fatal("test is vacuous: the origin never received the session cookie")
-	}
 	for i, s := range surfaces {
 		if strings.Contains(s, canaryValue) {
 			t.Errorf("surface %d leaked the cookie value: %.200s", i, s)
@@ -439,11 +506,11 @@ func TestSiteLoginRequiresConsent(t *testing.T) {
 
 	e.grant(t, "default", "alice")
 	out, text := callVaultTool(t, alice, "site_login", map[string]any{"url": "http://" + vaultTestHost + "/login", "use_login_window": true})
-	if out["status"] != "ok" || out["domain"] != vaultTestDomain || out["source"] != "login_window" {
+	if out["status"] != "ok" || out["domain"] != vaultTestDomain || out["source"] != "login_window" || out["kind"] != "profile" {
 		t.Fatalf("with consent: %s", text)
 	}
-	if out["cookieCount"] != float64(1) {
-		t.Errorf("cookieCount = %v, want 1", out["cookieCount"])
+	if got := e.deps.ProfileStore.List(context.Background(), cookievault.Subject{TenantID: "default", UserID: "alice"}); len(got) != 1 {
+		t.Errorf("profile store holds %d profiles, want 1", len(got))
 	}
 }
 
@@ -453,10 +520,11 @@ func TestSiteLoginDefaultNeedsBrowserNotWindow(t *testing.T) {
 	alice := e.client(t, "default", "alice")
 	url := "http://" + vaultTestHost + "/login"
 
-	// No attacher configured: tell the user how to enable it, open no window.
+	// Browser not reachable: tell the user how to enable it, open no window.
+	e.deps.CookieCapturer.WithAttacher(failAttacher{})
 	out, text := callVaultTool(t, alice, "site_login", map[string]any{"url": url})
 	if out["status"] != "browser_unavailable" || !strings.Contains(text, "remote-debugging") || !strings.Contains(text, "use_login_window") {
-		t.Fatalf("no attacher: %s", text)
+		t.Fatalf("unreachable browser: %s", text)
 	}
 
 	// Browser reached but not signed in to the site.
@@ -472,6 +540,28 @@ func TestSiteLoginDefaultNeedsBrowserNotWindow(t *testing.T) {
 	if got := e.deps.CookieVault.List(context.Background(), cookievault.Subject{TenantID: "default", UserID: "alice"}); len(got) != 0 {
 		t.Errorf("vault holds %d bundles after failed logins", len(got))
 	}
+}
+
+// Over HTTP there is no attacher: site_login must open the window by itself, not
+// fail with a hint about a browser the server cannot reach.
+func TestSiteLoginWithoutAttacherUsesWindow(t *testing.T) {
+	e := newVaultEnv(t)
+	e.grant(t, "default", "alice")
+	alice := e.client(t, "default", "alice")
+	out, text := callVaultTool(t, alice, "site_login", map[string]any{"url": "http://" + vaultTestHost + "/login"})
+	if out["status"] != "ok" || out["kind"] != "profile" || out["source"] != "login_window" {
+		t.Fatalf("no attacher: %s", text)
+	}
+	if n := e.driver.openCount(); n != 1 {
+		t.Errorf("login window opened %d times, want 1", n)
+	}
+}
+
+// failAttacher cannot reach the user's browser.
+type failAttacher struct{}
+
+func (failAttacher) Attach(context.Context, string) ([]cookievault.Cookie, error) {
+	return nil, cookievault.ErrAttachUnavailable
 }
 
 // emptyAttacher reaches the browser but finds no cookies for the site.
@@ -566,7 +656,7 @@ func TestSiteLoginRejectsBadURLs(t *testing.T) {
 	e := newVaultEnv(t)
 	e.deps.CookieCapturer = cookievault.NewCapturer(e.driver, func(ctx context.Context, h string) error {
 		return scraper.ValidateHost(ctx, h, false)
-	}, 1, time.Minute)
+	}, 1, time.Minute).WithProfiles(e.deps.ProfileStore)
 	e.grant(t, "default", "alice")
 	sess := e.client(t, "default", "alice")
 
@@ -691,5 +781,219 @@ func TestSiteLoginDenialIsAudited(t *testing.T) {
 	b, _ := json.Marshal(ev)
 	if ev.Success || ev.ErrorCode != "no_consent" || ev.ToolName != "site_login" || strings.Contains(string(b), canaryValue) {
 		t.Errorf("unexpected audit event: %s", b)
+	}
+}
+
+func (e *vaultEnv) profiles(tenant, user string) []cookievault.ProfileSummary {
+	return e.deps.ProfileStore.List(context.Background(), cookievault.Subject{TenantID: tenant, UserID: user})
+}
+
+func TestSiteLoginProfileRequiresConsent(t *testing.T) {
+	e := newVaultEnv(t)
+	alice := e.client(t, "default", "alice")
+	out, _ := callVaultTool(t, alice, "site_login", map[string]any{"url": "http://" + vaultTestHost + "/login", "use_login_window": true})
+	if out["status"] != "no_consent" {
+		t.Fatalf("status = %v, want no_consent", out["status"])
+	}
+	if n := e.driver.openCount(); n != 0 {
+		t.Errorf("browser opened %d times without consent", n)
+	}
+	if got := e.profiles("default", "alice"); len(got) != 0 {
+		t.Errorf("%d profiles saved without consent", len(got))
+	}
+}
+
+// A saved profile is used only with consent, only by its owner, and anonymous=true
+// skips it. With Chrome disabled in these deps a used profile shows up as a
+// browser error, an unused one as the public page.
+func TestScrapeProfileGating(t *testing.T) {
+	e := newVaultEnv(t)
+	e.seedProfile(t, "default", "alice")
+	alice := e.client(t, "default", "alice")
+	bob := e.client(t, "default", "bob")
+	args := map[string]any{"url": e.site.pageURL()}
+
+	_, text := callVaultTool(t, alice, "scrape_page", args)
+	if !strings.Contains(text, publicMarker) {
+		t.Fatalf("profile used without consent: %s", text)
+	}
+
+	e.grant(t, "default", "alice")
+	setsBefore := e.cache.setCount()
+	out, text := callVaultTool(t, alice, "scrape_page", args)
+	if n := e.cache.setCount(); n != setsBefore {
+		t.Errorf("a profile scrape wrote %d cache entries (failures must not be negative-cached either)", n-setsBefore)
+	}
+	if strings.Contains(text, publicMarker) || !strings.Contains(text, "Chrome unavailable") {
+		t.Fatalf("consenting owner did not go through the profile path: %s", text)
+	}
+	if out["authenticated"] == true {
+		t.Error("a failed profile scrape must not claim authenticated")
+	}
+
+	_, text = callVaultTool(t, alice, "scrape_page", map[string]any{"url": e.site.pageURL(), "anonymous": true})
+	if !strings.Contains(text, publicMarker) {
+		t.Fatalf("anonymous=true did not skip the saved profile: %s", text)
+	}
+
+	e.grant(t, "default", "bob")
+	if _, text = callVaultTool(t, bob, "scrape_page", args); !strings.Contains(text, publicMarker) {
+		t.Fatalf("another user's profile was used: %s", text)
+	}
+}
+
+func TestScrapeAnonymousSkipsCookieLogin(t *testing.T) {
+	e := newVaultEnv(t)
+	e.grant(t, "default", "alice")
+	e.seed(t, "default", "alice")
+	alice := e.client(t, "default", "alice")
+	out, text := callVaultTool(t, alice, "scrape_page", map[string]any{"url": e.site.pageURL(), "anonymous": true})
+	if !strings.Contains(text, publicMarker) || out["authenticated"] == true || e.site.sawCookie() {
+		t.Fatalf("anonymous=true still used the saved cookies: %s", text)
+	}
+}
+
+func TestScrapeProfileRawModeRefused(t *testing.T) {
+	e := newVaultEnv(t)
+	e.seedProfile(t, "default", "alice")
+	e.grant(t, "default", "alice")
+	alice := e.client(t, "default", "alice")
+	res, err := alice.CallTool(context.Background(), &mcp.CallToolParams{Name: "scrape_page", Arguments: map[string]any{"url": e.site.pageURL(), "mode": "raw"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := res.Content[0].(*mcp.TextContent).Text
+	if !res.IsError || !strings.Contains(text, "anonymous=true") {
+		t.Fatalf("raw mode with a profile: isError=%v %s", res.IsError, text)
+	}
+	if got := e.profiles("default", "alice"); len(got) != 1 {
+		t.Errorf("profile count = %d after a refused raw scrape, want 1", len(got))
+	}
+	if e.site.requestCount() != 0 {
+		t.Error("origin was contacted for a refused scrape")
+	}
+}
+
+func TestSiteLogoutRemovesProfile(t *testing.T) {
+	e := newVaultEnv(t)
+	e.grant(t, "default", "alice")
+	e.seedProfile(t, "default", "alice")
+	e.seed(t, "default", "alice")
+	alice := e.client(t, "default", "alice")
+	out, _ := callVaultTool(t, alice, "site_logout", map[string]any{"domain": vaultTestHost})
+	if out["removed"] != true || out["removedProfile"] != true || out["removedCookies"] != true {
+		t.Fatalf("logout = %v", out)
+	}
+	if got := e.profiles("default", "alice"); len(got) != 0 {
+		t.Errorf("profile survived logout: %v", got)
+	}
+	out, _ = callVaultTool(t, alice, "site_logout", map[string]any{"domain": vaultTestHost})
+	if out["removed"] != false {
+		t.Errorf("second logout = %v, want removed=false", out)
+	}
+}
+
+// One login per site: a new login of one kind removes the other, so a scrape
+// never mixes a profile with copied cookies.
+func TestLoginReplacesOtherKind(t *testing.T) {
+	e := newVaultEnv(t)
+	e.grant(t, "default", "alice")
+	subj := cookievault.Subject{TenantID: "default", UserID: "alice"}
+	alice := e.client(t, "default", "alice")
+	url := "http://" + vaultTestHost + "/login"
+
+	e.seed(t, "default", "alice")
+	if out, text := callVaultTool(t, alice, "site_login", map[string]any{"url": url, "use_login_window": true}); out["status"] != "ok" {
+		t.Fatal(text)
+	}
+	if n := len(e.deps.CookieVault.List(context.Background(), subj)); n != 0 {
+		t.Errorf("cookie bundle survived a profile login (%d)", n)
+	}
+	if n := len(e.profiles("default", "alice")); n != 1 {
+		t.Fatalf("profiles = %d, want 1", n)
+	}
+
+	e.deps.CookieCapturer.WithAttacher(cookieAttacher{canaryCookies()})
+	if out, text := callVaultTool(t, alice, "site_login", map[string]any{"url": url}); out["status"] != "ok" || out["kind"] != "cookies" {
+		t.Fatal(text)
+	}
+	if n := len(e.profiles("default", "alice")); n != 0 {
+		t.Errorf("profile survived a cookie login (%d)", n)
+	}
+	if n := len(e.deps.CookieVault.List(context.Background(), subj)); n != 1 {
+		t.Errorf("cookie bundles = %d, want 1", n)
+	}
+}
+
+// cookieAttacher returns fixed cookies as the user's signed-in browser.
+type cookieAttacher struct{ cookies []cookievault.Cookie }
+
+func (a cookieAttacher) Attach(context.Context, string) ([]cookievault.Cookie, error) {
+	return a.cookies, nil
+}
+
+// A sign-in the site did not keep (session cookies only) is refused, not stored.
+func TestSiteLoginSessionOnlyCookiesNotSaved(t *testing.T) {
+	e := newVaultEnv(t)
+	e.grant(t, "default", "alice")
+	e.driver.cookies = canaryCookies() // no expiry
+	alice := e.client(t, "default", "alice")
+	out, text := callVaultTool(t, alice, "site_login", map[string]any{"url": "http://" + vaultTestHost + "/login", "use_login_window": true})
+	if out["status"] != "profile_not_saved" || !strings.Contains(text, "remember me") {
+		t.Fatalf("session-only sign-in: %s", text)
+	}
+	if got := e.profiles("default", "alice"); len(got) != 0 {
+		t.Errorf("profile saved from session-only cookies: %v", got)
+	}
+}
+
+func TestProfileAuditAndMetrics(t *testing.T) {
+	e := newVaultEnv(t)
+	e.grant(t, "default", "alice")
+	alice := e.client(t, "default", "alice")
+	callVaultTool(t, alice, "site_login", map[string]any{"url": "http://" + vaultTestHost + "/login", "use_login_window": true})
+	callVaultTool(t, alice, "scrape_page", map[string]any{"url": e.site.pageURL()})
+	callVaultTool(t, alice, "site_logout", map[string]any{"domain": vaultTestDomain})
+
+	e.auditor.mu.Lock()
+	var login, logout bool
+	for _, ev := range e.auditor.events {
+		b, _ := json.Marshal(ev)
+		switch {
+		case ev.ToolName == "site_login" && ev.Success:
+			login = strings.Contains(string(b), `"kind":"profile"`) && strings.Contains(string(b), vaultTestDomain)
+		case ev.ToolName == "site_logout" && ev.Success:
+			logout = strings.Contains(string(b), `"removedProfile":true`)
+		}
+		if strings.Contains(string(b), canaryValue) || strings.Contains(string(b), "profile-bytes") {
+			t.Errorf("audit event leaks profile content: %s", b)
+		}
+	}
+	e.auditor.mu.Unlock()
+	if !login || !logout {
+		t.Errorf("audit trail incomplete: login=%v logout=%v", login, logout)
+	}
+
+	rec := httptest.NewRecorder()
+	e.deps.Metrics.HTTPHandler().ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+	for _, want := range []string{
+		`mcp_site_session_events_total{event="login",kind="profile",status="ok"} 1`,
+		`mcp_site_session_events_total{event="logout",kind="any",status="ok"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics missing %s", want)
+		}
+	}
+}
+
+func TestLoginHintForProfileNeedsWindow(t *testing.T) {
+	deps := setupTestDeps()
+	h := loginHintForKind(deps, "profile", "https://www.linkedin.com/feed/")
+	if !strings.Contains(h, "use_login_window=true") || !strings.Contains(h, "linkedin.com") {
+		t.Errorf("profile hint %q must name the login window and the site", h)
+	}
+	if h := loginHintForKind(deps, "cookies", "https://www.linkedin.com/feed/"); strings.Contains(h, "use_login_window") {
+		t.Errorf("cookie hint %q should not force the window", h)
 	}
 }

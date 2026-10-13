@@ -537,23 +537,26 @@ var memorySaveOutputSchema = map[string]any{
 var siteLoginOutputSchema = map[string]any{
 	"type": "object",
 	"properties": map[string]any{
-		"status":      map[string]any{"type": "string"}, // ok | no_consent | unavailable | browser_unavailable | not_signed_in | busy | timeout | invalid_url | blocked | nothing_captured | failed
+		"status":      map[string]any{"type": "string"}, // ok | no_consent | unavailable | browser_unavailable | not_signed_in | profile_not_saved | browser_launch_failed | too_many_profiles | profile_too_large | profiles_unavailable | busy | timeout | invalid_url | blocked | nothing_captured | failed
 		"reason":      map[string]any{"type": "string"},
 		"domain":      map[string]any{"type": "string"},
 		"cookieCount": map[string]any{"type": "integer"},
 		"capturedAt":  map[string]any{"type": "string"},
 		"expiresAt":   map[string]any{"type": "string"},
 		"source":      map[string]any{"type": "string"}, // browser | login_window
+		"kind":        map[string]any{"type": "string"}, // cookies | profile
 	},
 }
 
 var siteLogoutOutputSchema = map[string]any{
 	"type": "object",
 	"properties": map[string]any{
-		"status":  map[string]any{"type": "string"}, // ok | unavailable
-		"reason":  map[string]any{"type": "string"},
-		"domain":  map[string]any{"type": "string"},
-		"removed": map[string]any{"type": "boolean"},
+		"status":         map[string]any{"type": "string"}, // ok | unavailable
+		"reason":         map[string]any{"type": "string"},
+		"domain":         map[string]any{"type": "string"},
+		"removed":        map[string]any{"type": "boolean"},
+		"removedCookies": map[string]any{"type": "boolean"},
+		"removedProfile": map[string]any{"type": "boolean"},
 	},
 }
 

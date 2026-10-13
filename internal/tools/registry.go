@@ -105,6 +105,10 @@ type Dependencies struct {
 	// CookieVault holds saved site logins (#241). nil disables the feature:
 	// scrape_page then never injects cookies and site_logout is unregistered.
 	CookieVault cookievault.Store
+	// ProfileStore holds saved browser profiles for login-gated scraping (issue
+	// #775). nil disables the profile path: scrape_page then never launches a
+	// profile browser and site_logout removes cookies only.
+	ProfileStore *cookievault.ProfileStore
 	// CookieCapturer opens the visible login browser for site_login (#241). nil
 	// (HTTP mode, no Chrome) leaves site_login unregistered.
 	CookieCapturer *cookievault.Capturer

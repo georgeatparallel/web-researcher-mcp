@@ -880,6 +880,7 @@ class WebResearcherClient:
     async def scrape_page(
         self,
         url: str,
+        anonymous: bool = False,
         max_length: int = None,
         mode: str = None,
         sessionId: str = None,
@@ -889,6 +890,7 @@ class WebResearcherClient:
             "scrape_page",
             {
                 "url": url,
+                "anonymous": anonymous,
                 "max_length": max_length,
                 "mode": mode,
                 "sessionId": sessionId,
@@ -1739,6 +1741,7 @@ class SyncWebResearcherClient:
     def scrape_page(
         self,
         url: str,
+        anonymous: bool = False,
         max_length: int = None,
         mode: str = None,
         sessionId: str = None,
@@ -1746,6 +1749,7 @@ class SyncWebResearcherClient:
         return self._run(
             self._async_client.scrape_page(
             url=url,
+            anonymous=anonymous,
             max_length=max_length,
             mode=mode,
             sessionId=sessionId,

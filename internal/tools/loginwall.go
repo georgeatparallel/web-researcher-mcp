@@ -38,11 +38,17 @@ func looksLikeLoginWall(requestedURL, title, body string, words int) bool {
 	return passwordCue.MatchString(body) && signInCueRe.MatchString(body)
 }
 
-// loginHintFor returns the next step for an agent that hit a login wall, or ""
-// when site_login is not available (it registers only with a vault and a
-// capturer). authed says saved cookies were already sent, so the login is
-// stale or was rejected rather than missing.
+// loginHintFor is loginHintForKind for the cookie bundle (authed) or no login.
 func loginHintFor(deps Dependencies, authed bool, rawURL string) string {
+	return loginHintForKind(deps, rawAuthKind(authed), rawURL)
+}
+
+// loginHintForKind returns the next step for an agent that hit a login wall, or
+// "" when site_login is not available (it registers only with a vault and a
+// capturer). authKind says which saved login was already used ("cookies",
+// "profile") or "" for none, so the hint says expired rather than missing. A
+// profile can only be renewed in a login window.
+func loginHintForKind(deps Dependencies, authKind, rawURL string) string {
 	if deps.CookieVault == nil || deps.CookieCapturer == nil {
 		return ""
 	}
@@ -52,7 +58,10 @@ func loginHintFor(deps Dependencies, authed bool, rawURL string) string {
 			site = d
 		}
 	}
-	if authed {
+	switch authKind {
+	case "profile":
+		return "The saved sign-in for " + site + " looks expired or was rejected. Call site_login with use_login_window=true and the site's login URL to sign in again, then retry."
+	case "cookies":
 		return "The saved login for " + site + " looks expired or was rejected. Call site_login with the site's login URL to sign in again, then retry."
 	}
 	return "This page needs a login. To read it as you, call site_login with " + site + "'s login URL, then retry."

@@ -7,12 +7,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/url"
 	"strconv"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/zoharbabin/web-researcher-mcp/internal/content"
+	"github.com/zoharbabin/web-researcher-mcp/internal/cookievault"
 	"github.com/zoharbabin/web-researcher-mcp/internal/scraper"
 	"github.com/zoharbabin/web-researcher-mcp/internal/session"
 )
@@ -22,6 +25,7 @@ type scrapePageInput struct {
 	Mode      string `json:"mode,omitempty" jsonschema:"Extraction depth (preview = first 5000 bytes, faster; raw = verbatim unsanitized bytes, see tool description before using). Default: full (cleaned readable text up to max_length)."`
 	MaxLength int    `json:"max_length,omitempty" jsonschema:"Maximum content length in bytes (default: 50000). Reduce for faster responses when you only need a summary."`
 	SessionID string `json:"sessionId,omitempty" jsonschema:"Link this page to a sequential_search session. The URL and title are automatically recorded as a source for recovery after context loss."`
+	Anonymous bool   `json:"anonymous,omitempty" jsonschema:"Set true to read the page without your saved login (see site_login), as a signed-out visitor. Use it for public research so your account is not used. Default false: a saved login for the site is used automatically."`
 }
 
 // maxScrapeLength caps the requested max_length to bound memory for a single
@@ -52,7 +56,7 @@ func registerScrapePage(srv *mcp.Server, deps Dependencies) {
 	inputSchema.Properties["mode"].Enum = scrapeModeEnum()
 	addTool(srv, &mcp.Tool{
 		Name:         "scrape_page",
-		Description:  "Read a single URL and get back its content — web pages (including JavaScript-heavy sites), PDFs, Word/PowerPoint files, YouTube transcripts, Hacker News item/user/list pages (read natively via the HN API), GitHub README/file/gist pages (read natively via the GitHub API), and Bluesky posts and profiles (bsky.app, read natively via the AT Protocol API) — picking the best extraction method automatically. Returns readable text plus a ready-to-use citation. Reach for this when you already have a URL and want what's on the page; use search_and_scrape to find and read in one step, or web_search when you only need links. Modes: full (default, cleaned text), preview (a fast first look), and raw (verbatim page bytes with no sanitization — only for inspecting source like JSON or HTML, and the bytes are untrusted, so never execute or render them). If the page is a peer-reviewed article that declares a DOI, that DOI is surfaced with its retraction/integrity status (evidence to check, not a verdict — you confirm the document's identity). Blocked pages, bot/JS-walls, dead links (404/410), and other failures return structured JSON (kind, retryable, suggestedAction) — a 404 is reported as a non-retryable not_found, a bot-wall as blocked. Results stay fresh for 1 hour. If you saved a login for the site with site_login (opt-in), those cookies are sent automatically and the result is marked authenticated and never cached.",
+		Description:  "Read a single URL and get back its content — web pages (including JavaScript-heavy sites), PDFs, Word/PowerPoint files, YouTube transcripts, Hacker News item/user/list pages (read natively via the HN API), GitHub README/file/gist pages (read natively via the GitHub API), and Bluesky posts and profiles (bsky.app, read natively via the AT Protocol API) — picking the best extraction method automatically. Returns readable text plus a ready-to-use citation. Reach for this when you already have a URL and want what's on the page; use search_and_scrape to find and read in one step, or web_search when you only need links. Modes: full (default, cleaned text), preview (a fast first look), and raw (verbatim page bytes with no sanitization — only for inspecting source like JSON or HTML, and the bytes are untrusted, so never execute or render them). If the page is a peer-reviewed article that declares a DOI, that DOI is surfaced with its retraction/integrity status (evidence to check, not a verdict — you confirm the document's identity). Blocked pages, bot/JS-walls, dead links (404/410), and other failures return structured JSON (kind, retryable, suggestedAction) — a 404 is reported as a non-retryable not_found, a bot-wall as blocked. Results stay fresh for 1 hour. If you saved a login for the site with site_login (opt-in), it is used automatically (cookies, or a saved browser profile that runs in a headless browser) and the result is marked authenticated and never cached; set anonymous=true to read as a signed-out visitor instead. A saved browser profile supports full and preview modes, not raw, and reads one page at a time per site.",
 		Annotations:  readOnlyAnnotations(true, true),
 		InputSchema:  inputSchema,
 		OutputSchema: scrapePageOutputSchema,
@@ -79,21 +83,56 @@ func registerScrapePage(srv *mcp.Server, deps Dependencies) {
 			maxLength = 5000
 		}
 
-		// Saved login (#241): when the caller has a vault bundle for this site and
-		// has consented, the scrape carries those cookies. An authenticated result
-		// is per-user, so it never touches the shared cache, negative cache or
-		// artifact store (a later anonymous request must not receive it).
-		cookies := vaultCookiesFor(ctx, deps, input.URL)
-		authed := len(cookies) > 0
-		if authed {
+		// Saved login (#241, #775): when the caller has a saved browser profile or
+		// cookie bundle for this site and has consented, the scrape uses it. An
+		// authenticated result is per-user, so it never touches the shared cache,
+		// negative cache or artifact store (a later anonymous request must not
+		// receive it). anonymous=true skips the login entirely.
+		var cookies []cookievault.Cookie
+		var lease *cookievault.ProfileLease
+		if !input.Anonymous {
+			var lerr error
+			if lease, lerr = profileLeaseFor(ctx, deps, input.URL); lerr != nil {
+				recordToolCall(deps, "scrape_page", time.Since(start), lerr, "profile_busy", false)
+				auditToolCallQuery(ctx, deps, "scrape_page", time.Since(start), lerr, "profile_busy", "", scrapeAuditExtra("profile", input.URL))
+				recordSiteSession(deps, "scrape", "profile", "busy")
+				return structuredError("The saved sign-in for this site is in use by another scrape or login. Retry in a minute.",
+					ToolError{Kind: ErrKindUpstream, Retryable: true, SuggestedAction: ActionRetryAfterDelay}), nil, nil
+			}
+			if lease == nil {
+				cookies = vaultCookiesFor(ctx, deps, input.URL)
+			}
+		}
+		authKind := ""
+		switch {
+		case lease != nil:
+			authKind = "profile"
+		case len(cookies) > 0:
+			authKind = "cookies"
+		}
+		authed := authKind != ""
+		auditExtra := scrapeAuditExtra(authKind, input.URL)
+		profileStatus := "error"
+		if lease != nil {
+			defer func() {
+				recordSiteSession(deps, "scrape", "profile", profileStatus)
+				endProfileLease(ctx, lease, profileStatus == "ok")
+			}()
+		}
+		if len(cookies) > 0 {
 			ctx = scraper.WithCookies(ctx, cookies)
 		}
+		hintFor := func() string { return loginHintForKind(deps, authKind, input.URL) }
 
 		// Raw mode returns the page bytes verbatim (no sanitization, no
 		// content extraction) so an LLM can inspect source such as JSON or
 		// HTML. It is handled on its own path with a distinct cache key so a
 		// raw response never collides with the cleaned full/preview cache.
 		if mode == "raw" {
+			if lease != nil {
+				profileStatus = "unsupported"
+				return toolError("mode=raw is not available with a saved browser profile; use mode full or preview, or set anonymous=true"), nil, nil
+			}
 			return scrapeRaw(ctx, deps, input, maxLength, start, authed)
 		}
 
@@ -111,20 +150,27 @@ func registerScrapePage(srv *mcp.Server, deps Dependencies) {
 			if neg := negCacheLookup(ctx, deps, input.URL); neg != nil {
 				recordToolCall(deps, "scrape_page", time.Since(start), neg, "upstream_error", true)
 				auditToolCall(ctx, deps, "scrape_page", time.Since(start), neg, "upstream_error")
-				return scrapeErrorResponseHint(neg, input.URL, loginHintFor(deps, authed, input.URL)), nil, nil
+				return scrapeErrorResponseHint(neg, input.URL, hintFor()), nil, nil
 			}
 		}
 
-		result, err := deps.Scraper.Scrape(ctx, input.URL, maxLength)
+		var result *scraper.ScrapeResult
+		var err error
+		if lease != nil {
+			result, err = deps.Scraper.ScrapeWithProfile(ctx, input.URL, maxLength,
+				scraper.ProfileSpec{Dir: lease.Dir, Domain: lease.Meta.Domain, Browser: lease.Meta.Browser})
+		} else {
+			result, err = deps.Scraper.Scrape(ctx, input.URL, maxLength)
+		}
 		if err != nil {
 			recordToolCall(deps, "scrape_page", time.Since(start), err, "upstream_error", false)
-			auditToolCall(ctx, deps, "scrape_page", time.Since(start), err, "upstream_error")
+			auditToolCallQuery(ctx, deps, "scrape_page", time.Since(start), err, "upstream_error", "", auditExtra)
 			var se *scraper.ScrapeError
 			if errors.As(err, &se) && !authed {
 				writeNegCache(ctx, deps, input.URL, se)
 			}
 			trackScrapeOutcome(ctx, deps, input.SessionID, input.URL, err)
-			return scrapeErrorResponseHint(err, input.URL, loginHintFor(deps, authed, input.URL)), nil, nil
+			return scrapeErrorResponseHint(err, input.URL, hintFor()), nil, nil
 		}
 
 		processedContent, truncated := deps.Content.Process(result.Content, maxLength)
@@ -168,9 +214,18 @@ func registerScrapePage(srv *mcp.Server, deps Dependencies) {
 		output["wordCount"] = result.WordCount
 		// Login-wall signal: the page is probably a sign-in page, not the content.
 		// With saved cookies it means the login expired; without, that none exists.
-		if hint := loginHintFor(deps, authed, input.URL); hint != "" && looksLikeLoginWall(input.URL, result.Title, processedContent, result.WordCount) {
+		wall := looksLikeLoginWall(input.URL, result.Title, processedContent, result.WordCount)
+		if hint := hintFor(); hint != "" && wall {
 			output["loginRequired"] = true
 			output["loginHint"] = hint
+		}
+		// A profile that landed on a login page is not saved back, and the page is
+		// not retried: the sign-in is gone and only site_login can fix it.
+		switch {
+		case wall:
+			profileStatus = "login_wall"
+		default:
+			profileStatus = "ok"
 		}
 		if result.SparsityWarning != "" {
 			output["sparsityWarning"] = result.SparsityWarning
@@ -255,7 +310,7 @@ func registerScrapePage(srv *mcp.Server, deps Dependencies) {
 			deps.Cache.Set(ctx, cacheKey, jsonBytes, time.Hour)
 		}
 		recordToolCall(deps, "scrape_page", time.Since(start), nil, "", false)
-		auditToolCall(ctx, deps, "scrape_page", time.Since(start), nil, "")
+		auditToolCallQuery(ctx, deps, "scrape_page", time.Since(start), nil, "", "", auditExtra)
 
 		if input.SessionID != "" {
 			trackSources(ctx, deps, input.SessionID, []session.ResearchSource{
@@ -266,6 +321,42 @@ func registerScrapePage(srv *mcp.Server, deps Dependencies) {
 
 		return structuredResult(jsonBytes), nil, nil
 	})
+}
+
+// scrapeAuditExtra is the audit metadata of a scrape that used a saved login: the
+// kind and the site's registrable domain, never cookie or profile content. nil
+// for an anonymous scrape.
+func scrapeAuditExtra(authKind, rawURL string) map[string]any {
+	if authKind == "" {
+		return nil
+	}
+	domain := ""
+	if u, err := url.Parse(rawURL); err == nil {
+		domain = cookievault.RegistrableDomain(u.Hostname())
+	}
+	return map[string]any{"authKind": authKind, "domain": domain}
+}
+
+// rawAuthKind names the login a raw scrape used: raw mode never uses a profile.
+func rawAuthKind(authed bool) string {
+	if authed {
+		return "cookies"
+	}
+	return ""
+}
+
+// endProfileLease saves the profile back (keep) or drops the work dir. It runs
+// after the browser has exited, and finishes even if the caller's context ended.
+func endProfileLease(ctx context.Context, lease *cookievault.ProfileLease, keep bool) {
+	if !keep {
+		lease.Discard()
+		return
+	}
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if _, err := lease.Commit(cctx); err != nil {
+		slog.Warn("saved browser profile was not updated after a scrape", "err", err)
+	}
 }
 
 // rawContentSizeFromCache recovers the raw content's byte length from a
@@ -317,7 +408,7 @@ func scrapeRaw(ctx context.Context, deps Dependencies, input scrapePageInput, ma
 	if neg := negCacheLookup(ctx, deps, input.URL); neg != nil && neg.Kind != scraper.ErrContent && !authed {
 		recordToolCall(deps, "scrape_page", time.Since(start), neg, "upstream_error", true)
 		auditToolCall(ctx, deps, "scrape_page", time.Since(start), neg, "upstream_error")
-		return scrapeErrorResponseHint(neg, input.URL, loginHintFor(deps, authed, input.URL)), nil, nil
+		return scrapeErrorResponseHint(neg, input.URL, loginHintForKind(deps, rawAuthKind(authed), input.URL)), nil, nil
 	}
 
 	result, err := deps.Scraper.ScrapeRaw(ctx, input.URL, maxLength)
@@ -329,7 +420,7 @@ func scrapeRaw(ctx context.Context, deps Dependencies, input scrapePageInput, ma
 			writeNegCache(ctx, deps, input.URL, se)
 		}
 		trackScrapeOutcome(ctx, deps, input.SessionID, input.URL, err)
-		return scrapeErrorResponseHint(err, input.URL, loginHintFor(deps, authed, input.URL)), nil, nil
+		return scrapeErrorResponseHint(err, input.URL, loginHintForKind(deps, rawAuthKind(authed), input.URL)), nil, nil
 	}
 
 	contentLen := len(result.Content)

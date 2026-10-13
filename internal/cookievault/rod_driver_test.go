@@ -84,14 +84,14 @@ func TestRodDriverBrowserBin(t *testing.T) {
 	t.Cleanup(func() { lookPath = orig })
 
 	lookPath = func() (string, bool) { return "/installed/chrome", true }
-	if got := (&RodDriver{chromePath: "/explicit/chromium"}).browserBin(); got != "/explicit/chromium" {
+	if got := (&RodDriver{chromePath: "/explicit/chromium"}).BrowserBin(); got != "/explicit/chromium" {
 		t.Fatalf("explicit path = %q", got)
 	}
-	if got := NewRodDriver("").browserBin(); got != "/installed/chrome" {
+	if got := NewRodDriver("").BrowserBin(); got != "/installed/chrome" {
 		t.Fatalf("installed browser = %q", got)
 	}
 	lookPath = func() (string, bool) { return "", false }
-	if got := NewRodDriver("").browserBin(); got != "" {
+	if got := NewRodDriver("").BrowserBin(); got != "" {
 		t.Fatalf("no browser = %q", got)
 	}
 }
