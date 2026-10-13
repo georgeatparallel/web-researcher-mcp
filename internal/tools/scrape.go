@@ -356,7 +356,8 @@ func endProfileLease(ctx context.Context, lease *cookievault.ProfileLease, keep 
 	}
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	if _, err := lease.Commit(cctx); err != nil {
+	// ErrNoProfile means site_logout ran during the scrape: expected, not a fault.
+	if _, err := lease.Commit(cctx); err != nil && !errors.Is(err, cookievault.ErrNoProfile) {
 		slog.Warn("saved browser profile was not updated after a scrape", "err", err)
 	}
 }
@@ -627,6 +628,10 @@ func scrapeErrorResponseHint(err error, url, loginHint string) *mcp.CallToolResu
 		// Permanent rejection: unsupported scheme, empty host, or an SSRF /
 		// private-IP / blocked-hostname denial. Report the precise reason and
 		// do NOT suggest a retry or a bug report — the URL itself must change.
+		if errors.Is(se, scraper.ErrProfileOffSite) {
+			msg = fmt.Sprintf("Stopped: %s was opened with a saved sign-in, which only works on its own site, and %s. If it sent you to a sign-in page, the sign-in expired: call site_login with use_login_window=true, then retry. To read the other site, scrape it with anonymous=true.", url, se.Message)
+			break
+		}
 		msg = fmt.Sprintf("URL rejected for %s: %s. Provide a valid public http(s) URL.", url, se.Message)
 	case scraper.ErrBrowser:
 		msg = fmt.Sprintf("Scrape failed: Chrome unavailable. Set CHROME_PATH or install Chrome. Report at %s", issueURL)

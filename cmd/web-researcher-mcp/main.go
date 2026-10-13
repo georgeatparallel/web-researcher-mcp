@@ -230,6 +230,9 @@ func main() {
 			// Saved browser profiles (issue #775): same key and consent as the vault,
 			// own encrypted store, own TTL.
 			ps, perr := cookievault.NewProfileStore(filepath.Join(cfg.CacheDir, "profiles"), cfg.CookieVaultKey, cfg.CookieVaultProfileTTL)
+			if perr == nil {
+				ps.WithMaxTotalBytes(int64(cfg.CookieVaultProfileMaxTotalMB) << 20)
+			}
 			if perr != nil {
 				logger.Error("saved browser profiles disabled: encrypted store unavailable", "err", perr)
 			} else {

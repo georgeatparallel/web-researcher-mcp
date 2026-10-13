@@ -2,9 +2,11 @@ package scraper
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -21,6 +23,10 @@ type ProfileSpec struct {
 	Domain  string // registrable domain the profile is signed in to
 	Browser string // binary that created the profile; "" or missing falls back to config
 }
+
+// ErrProfileOffSite marks a scrape that a saved profile stopped because the page
+// went to another site. The sign-in only works on its own domain.
+var ErrProfileOffSite = errors.New("scraper: page went to a site the saved sign-in does not cover")
 
 const (
 	profileScrapeTimeout = 60 * time.Second
@@ -84,12 +90,36 @@ func (p *Pipeline) ScrapeWithProfile(ctx context.Context, rawURL string, maxLeng
 	}
 	defer func() { _ = page.Close() }()
 
-	var leftSite atomic.Bool
+	// Every request is checked. Pages (documents) must stay on the profile's
+	// site and resolve to public addresses. Other requests (scripts, images,
+	// XHR) may go to any site that resolves to a public address, so the signed-in
+	// page cannot reach internal hosts.
+	var offSite atomic.Pointer[string]
+	var hostVerdicts sync.Map // host -> public (bool)
+	public := func(host string) bool {
+		if host == "" {
+			return true
+		}
+		if v, ok := hostVerdicts.Load(host); ok {
+			return v.(bool)
+		}
+		ok := ValidateHost(ctx, host, p.config.AllowPrivateIPs) == nil
+		hostVerdicts.Store(host, ok)
+		return ok
+	}
 	router := page.HijackRequests()
-	if err := router.Add("*", proto.NetworkResourceTypeDocument, func(h *rod.Hijack) {
+	if err := router.Add("*", "", func(h *rod.Hijack) {
 		u := h.Request.URL()
-		if !onProfileSite(u.String(), spec.Domain) || ValidateHost(ctx, u.Hostname(), p.config.AllowPrivateIPs) != nil {
-			leftSite.Store(true)
+		if u == nil {
+			h.Response.Fail(proto.NetworkErrorReasonBlockedByClient)
+			return
+		}
+		host := u.Hostname()
+		isDoc := h.Request.Type() == proto.NetworkResourceTypeDocument
+		if blockProfileRequest(isDoc, u.String(), host, spec.Domain, public) {
+			if isDoc && !onProfileSite(u.String(), spec.Domain) {
+				offSite.CompareAndSwap(nil, &host)
+			}
 			h.Response.Fail(proto.NetworkErrorReasonBlockedByClient)
 			return
 		}
@@ -112,15 +142,14 @@ func (p *Pipeline) ScrapeWithProfile(ctx context.Context, rawURL string, maxLeng
 		func(e *proto.PageFrameNavigated) bool { return e.Frame.ID == page.FrameID },
 	)
 	if err := page.Navigate(rawURL); err != nil {
-		if leftSite.Load() {
-			return nil, authError(rawURL, "browser", 401)
+		if host := offSite.Load(); host != nil {
+			return nil, offSiteError(rawURL, *host)
 		}
 		return nil, networkError(rawURL, "browser", fmt.Errorf("navigation failed: %w", err))
 	}
 	waitNav()
-	if leftSite.Load() {
-		// A redirect to another site is how a signed-out profile is sent to log in.
-		return nil, authError(rawURL, "browser", 401)
+	if host := offSite.Load(); host != nil {
+		return nil, offSiteError(rawURL, *host)
 	}
 	if gotStatus && mainStatus >= 400 {
 		return nil, classifyHTTPStatus(mainStatus, rawURL, "browser")
@@ -184,6 +213,21 @@ func stableContent(ctx context.Context, page *rod.Page, rawURL string) (string, 
 		case <-time.After(profilePollEvery):
 		}
 	}
+}
+
+// blockProfileRequest decides whether a request from a profile scrape is
+// stopped. A page (document) must be on the profile's domain and public. Any
+// other request only has to go to a public host.
+func blockProfileRequest(isDocument bool, rawURL, host, domain string, public func(host string) bool) bool {
+	if isDocument && !onProfileSite(rawURL, domain) {
+		return true
+	}
+	return !public(host)
+}
+
+// offSiteError is the permanent rejection for a page that left the profile's site.
+func offSiteError(rawURL, host string) *ScrapeError {
+	return newScrapeError(ErrValidation, rawURL, "browser", ErrProfileOffSite, "the page went to "+host)
 }
 
 // onProfileSite reports whether rawURL is on domain or one of its subdomains.

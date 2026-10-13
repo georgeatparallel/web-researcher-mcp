@@ -64,7 +64,7 @@ run_named_tests() {
 
 export -f run_named_tests
 
-NEW_FILES="internal/cache/streamcrypto.go internal/cookievault/profile.go internal/cookievault/profile_archive.go internal/cookievault/profile_browser.go internal/cookievault/browser_pipe_unix.go internal/cookievault/browser_pipe_windows.go internal/cookievault/pid_unix.go internal/cookievault/pid_windows.go internal/scraper/profile_browser.go"
+NEW_FILES="internal/cache/streamcrypto.go internal/cookievault/profile.go internal/cookievault/profile_archive.go internal/cookievault/profile_browser.go internal/cookievault/browser_pipe.go internal/cookievault/browser_pipe_unix.go internal/cookievault/browser_pipe_windows.go internal/cookievault/pid_unix.go internal/cookievault/pid_windows.go internal/scraper/profile_browser.go"
 
 run_gate "Lint (golangci-lint)" \
   "$OUT_DIR/775-01-lint.log" \
@@ -80,8 +80,8 @@ run_gate "SAST (gosec) + pattern checks (rules 3, 6, 7, 12)" \
     for f in '"$NEW_FILES"'; do test -f "$f" || { echo "missing $f"; exit 1; }; done
     echo "--- no http.DefaultClient / os/exec / panic in new files ---"
     none grep -nE "http\.DefaultClient|panic\(" '"$NEW_FILES"'
-    echo "--- os/exec only in the DevTools-pipe launcher (fixed browser binary and flags) ---"
-    none sh -c "grep -ln os/exec '"$NEW_FILES"' | grep -v browser_pipe_unix.go"
+    echo "--- os/exec only in the DevTools-pipe launcher and its platform hooks (fixed browser binary and flags) ---"
+    none sh -c "grep -ln os/exec '"$NEW_FILES"' | grep -Ev \"/browser_pipe(_unix|_windows)?\\.go\\$\""
     echo "--- no TODO/FIXME in new files ---"
     none grep -nE "TODO|FIXME" '"$NEW_FILES"'
     echo "--- no logging call touches cookie values/names or paths (rule 6) ---"

@@ -381,6 +381,26 @@ jobs:
       - name: Run fuzz targets (20s each)
         run: make test-fuzz FUZZTIME=20s
 
+  # 🪟 Windows DevTools pipe (#775) — the profile browser must start over the
+  # --remote-debugging-io-pipes handles and open no TCP debug port. This is the
+  # only place the Windows pipe launch runs against a real browser (the
+  # windows-latest image ships Chrome). Not a required check.
+  windows-pipe:
+    name: 🪟 Windows · DevTools Pipe
+    needs: [changes, lint]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.27.2"
+          cache: true
+
+      - name: Run profile-browser pipe tests
+        run: go test -count=1 -v -run 'TestProfileBrowser|TestPipeBrowser' ./internal/cookievault/
+
   # Gate job: always reports under the exact name required by branch protection.
   # When code=true the matrix job ran; when code=false it was skipped (docs PR).
   # Either way this job passes so auto-merge isn't stuck.

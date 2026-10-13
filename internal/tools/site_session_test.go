@@ -19,6 +19,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/net/dns/dnsmessage"
 
+	"github.com/zoharbabin/web-researcher-mcp/internal/auth"
 	"github.com/zoharbabin/web-researcher-mcp/internal/cache"
 	"github.com/zoharbabin/web-researcher-mcp/internal/consent"
 	"github.com/zoharbabin/web-researcher-mcp/internal/content"
@@ -1026,5 +1027,34 @@ func TestSiteLogoutAcceptsSchemeLessURL(t *testing.T) {
 	out, _ := callVaultTool(t, alice, "site_logout", map[string]any{"domain": vaultTestHost + "/feed?x=1"})
 	if out["removedProfile"] != true {
 		t.Fatalf("logout with a path = %v, want the profile removed", out)
+	}
+}
+
+// siteLoginFailure names the saved sites for too_many_profiles and has its own
+// status for a full profile store (issue #775).
+func TestSiteLoginFailureProfileLimits(t *testing.T) {
+	e := newVaultEnv(t)
+	e.seedProfile(t, "default", "alice")
+	ctx := auth.WithIdentity(context.Background(), "default", "alice")
+
+	res := siteLoginFailure(ctx, e.deps, time.Now(), "profile", cookievault.ErrTooManyProfiles)
+	var out map[string]any
+	if err := json.Unmarshal([]byte(res.Content[0].(*mcp.TextContent).Text), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["status"] != "too_many_profiles" || !strings.Contains(out["reason"].(string), vaultTestDomain) {
+		t.Errorf("too_many_profiles result = %v, want the saved domain %q named", out, vaultTestDomain)
+	}
+	// Another user's sites are never listed.
+	other := auth.WithIdentity(context.Background(), "default", "bob")
+	res = siteLoginFailure(other, e.deps, time.Now(), "profile", cookievault.ErrTooManyProfiles)
+	if strings.Contains(res.Content[0].(*mcp.TextContent).Text, vaultTestDomain) {
+		t.Error("another user's saved site leaked into the message")
+	}
+
+	res = siteLoginFailure(ctx, e.deps, time.Now(), "profile", cookievault.ErrProfileStoreFull)
+	text := res.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(text, `"profile_store_full"`) || !strings.Contains(text, "COOKIE_VAULT_PROFILE_MAX_TOTAL_MB") {
+		t.Errorf("store-full result = %s", text)
 	}
 }

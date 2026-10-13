@@ -82,8 +82,36 @@ func TestProfileScrapeHonorsTenantLimit(t *testing.T) {
 	}
 }
 
+// TestBlockProfileRequest: pages must stay on the profile's site and be public;
+// scripts, images and XHR may go to any public host, never to a private one.
+func TestBlockProfileRequest(t *testing.T) {
+	public := func(host string) bool { return host != "internal.corp" && host != "10.0.0.5" }
+	cases := []struct {
+		name    string
+		isDoc   bool
+		url     string
+		host    string
+		blocked bool
+	}{
+		{"page on site", true, "https://www.example.com/feed", "www.example.com", false},
+		{"page on other site", true, "https://other.org/login", "other.org", true},
+		{"page on private host", true, "https://internal.corp/", "internal.corp", true},
+		{"subresource on a CDN", false, "https://cdn.other.org/app.js", "cdn.other.org", false},
+		{"subresource on site", false, "https://www.example.com/a.png", "www.example.com", false},
+		{"subresource on private name", false, "https://internal.corp/api", "internal.corp", true},
+		{"subresource on private ip", false, "http://10.0.0.5:8080/x", "10.0.0.5", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := blockProfileRequest(tc.isDoc, tc.url, tc.host, "example.com", public); got != tc.blocked {
+				t.Errorf("blocked = %v, want %v", got, tc.blocked)
+			}
+		})
+	}
+}
+
 // TestProfileBlocksOffDomainNavigation: a redirect off the profile's site is
-// refused before it is sent, and reads as a login request.
+// refused before it is sent, and reports where the page went (not a login wall).
 func TestProfileBlocksOffDomainNavigation(t *testing.T) {
 	skipIfNoChrome(t)
 	var mu sync.Mutex
@@ -101,8 +129,11 @@ func TestProfileBlocksOffDomainNavigation(t *testing.T) {
 	p := profilePipeline(true)
 	_, err := p.ScrapeWithProfile(context.Background(), srv.URL+"/", 5000, ProfileSpec{Dir: t.TempDir(), Domain: domain})
 	var se *ScrapeError
-	if !errors.As(err, &se) || se.Kind != ErrAuth {
-		t.Fatalf("err = %v, want ErrAuth", err)
+	if !errors.As(err, &se) || se.Kind != ErrValidation || !errors.Is(err, ErrProfileOffSite) {
+		t.Fatalf("err = %v, want ErrValidation wrapping ErrProfileOffSite", err)
+	}
+	if !strings.Contains(se.Message, "localhost") {
+		t.Errorf("message %q does not name the host", se.Message)
 	}
 	mu.Lock()
 	defer mu.Unlock()

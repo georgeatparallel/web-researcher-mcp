@@ -35,6 +35,9 @@ type Config struct {
 	// CookieVaultProfileTTL is the absolute lifetime of a saved browser profile
 	// (COOKIE_VAULT_PROFILE_TTL, issue #775).
 	CookieVaultProfileTTL time.Duration
+	// CookieVaultProfileMaxTotalMB caps the combined size of all saved browser
+	// profiles on this node (COOKIE_VAULT_PROFILE_MAX_TOTAL_MB, issue #775).
+	CookieVaultProfileMaxTotalMB int
 	// CookieCaptureInHTTP lets site_login run in HTTP mode, where the login
 	// window opens on the server's own display (COOKIE_CAPTURE_IN_HTTP, #775).
 	CookieCaptureInHTTP bool
@@ -407,6 +410,7 @@ func Load() (*Config, error) {
 	maxCaptures := envInt("MAX_CONCURRENT_CAPTURES", 1)
 	captureTimeout := envDuration("COOKIE_CAPTURE_TIMEOUT", 5*time.Minute)
 	profileTTL := envDuration("COOKIE_VAULT_PROFILE_TTL", defaultProfileTTL)
+	profileMaxTotalMB := envInt("COOKIE_VAULT_PROFILE_MAX_TOTAL_MB", defaultProfileMaxTotalMB)
 	if cookieVaultEnabled {
 		switch {
 		case cookieVaultKey == "":
@@ -421,6 +425,9 @@ func Load() (*Config, error) {
 		}
 		if profileTTL <= 0 || profileTTL > maxCookieVaultTTL {
 			errs = append(errs, "COOKIE_VAULT_PROFILE_TTL must be between 1s and 720h")
+		}
+		if profileMaxTotalMB < 64 || profileMaxTotalMB > 102400 {
+			errs = append(errs, "COOKIE_VAULT_PROFILE_MAX_TOTAL_MB must be between 64 and 102400")
 		}
 		if maxCaptures < 1 || maxCaptures > 5 {
 			errs = append(errs, "MAX_CONCURRENT_CAPTURES must be between 1 and 5")
@@ -606,19 +613,20 @@ func Load() (*Config, error) {
 			ReferrerPolicy:    envOrDefault("HTTP_REFERRER_POLICY", "no-referrer"),
 			PermissionsPolicy: envOrDefault("HTTP_PERMISSIONS_POLICY", "geolocation=(), camera=(), microphone=()"),
 		},
-		CacheDir:                envOrDefault("CACHE_DIR", defaultCacheDir()),
-		CacheMaxMemoryMB:        envInt("CACHE_MAX_MEMORY_MB", 64),
-		CacheEncryptionKey:      encKey,
-		CacheEncryptionKeyPrev:  encKeyPrev,
-		CookieVaultKey:          cookieVaultKey,
-		CookieVaultTTL:          cookieVaultTTL,
-		MaxConcurrentCaptures:   maxCaptures,
-		CookieCaptureTimeout:    captureTimeout,
-		CookieVaultProfileTTL:   profileTTL,
-		CookieCaptureInHTTP:     cookieCaptureInHTTP,
-		CookieVaultStdioConsent: cookieVaultStdioConsent,
-		CacheIsolation:          envOrDefault("CACHE_ISOLATION", "shared"),
-		RedisURL:                os.Getenv("REDIS_URL"),
+		CacheDir:                     envOrDefault("CACHE_DIR", defaultCacheDir()),
+		CacheMaxMemoryMB:             envInt("CACHE_MAX_MEMORY_MB", 64),
+		CacheEncryptionKey:           encKey,
+		CacheEncryptionKeyPrev:       encKeyPrev,
+		CookieVaultKey:               cookieVaultKey,
+		CookieVaultTTL:               cookieVaultTTL,
+		MaxConcurrentCaptures:        maxCaptures,
+		CookieCaptureTimeout:         captureTimeout,
+		CookieVaultProfileTTL:        profileTTL,
+		CookieVaultProfileMaxTotalMB: profileMaxTotalMB,
+		CookieCaptureInHTTP:          cookieCaptureInHTTP,
+		CookieVaultStdioConsent:      cookieVaultStdioConsent,
+		CacheIsolation:               envOrDefault("CACHE_ISOLATION", "shared"),
+		RedisURL:                     os.Getenv("REDIS_URL"),
 		RateLimit: RateLimitConfig{
 			PerTenant:      envInt("RATE_LIMIT_PER_TENANT", 120),
 			Global:         envInt("RATE_LIMIT_GLOBAL", 1000),
@@ -783,6 +791,8 @@ const (
 	// Saved browser profile lifetime: a week, because a profile is signed in
 	// once and reused (issue #775).
 	defaultProfileTTL = 7 * 24 * time.Hour
+	// defaultProfileMaxTotalMB matches cookievault.DefaultProfileMaxTotalBytes.
+	defaultProfileMaxTotalMB = 2048
 )
 
 // hostGOOS is runtime.GOOS; a variable so tests can pose as another OS.

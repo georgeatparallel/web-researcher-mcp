@@ -88,7 +88,7 @@ type ProfileBrowser struct {
 	Browser *rod.Browser
 	once    sync.Once
 
-	// Port mode (Windows): a loopback debug port.
+	// Port mode (Windows fallback only): a loopback debug port.
 	l    *launcher.Launcher
 	addr string
 
@@ -116,9 +116,12 @@ func LaunchBrowser(o BrowserLaunch) (*ProfileBrowser, error) {
 }
 
 func launchOnce(o BrowserLaunch) (*ProfileBrowser, error) {
-	if pipeSupported {
-		return launchPipe(o)
+	pb, err := launchPipe(o)
+	if err == nil || !portFallback {
+		return pb, err
 	}
+	// Windows only: a Chrome without the pipe switch cannot be reached this way.
+	slog.Warn("devtools pipe unavailable; using a loopback debug port")
 	l := o.newLauncher()
 	controlURL, err := l.Launch()
 	if err != nil {

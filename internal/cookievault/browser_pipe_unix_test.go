@@ -41,27 +41,3 @@ func TestProfileBrowserOpensNoDebugPort(t *testing.T) {
 		t.Fatalf("browser listens on a TCP port:\n%s", out)
 	}
 }
-
-// The browser exits when its pipe closes, so a crashed server leaves no browser.
-func TestProfileBrowserExitsWhenPipeCloses(t *testing.T) {
-	bin := ResolveBrowser("")
-	if bin == "" {
-		t.Skip("no browser installed")
-	}
-	dir, err := os.MkdirTemp("", "pipe-exit-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { removeDir(dir) })
-	pb, err := LaunchBrowser(BrowserLaunch{Bin: bin, Dir: dir, Headless: true, NoSandbox: os.Geteuid() == 0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pb.Shutdown()
-	pb.closePipes()
-	select {
-	case <-pb.exited:
-	case <-time.After(15 * time.Second):
-		t.Fatal("browser still running after its pipe closed")
-	}
-}

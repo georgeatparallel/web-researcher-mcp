@@ -585,6 +585,7 @@ Regulated features (per-user personal data; each activates the consent subsystem
 | `COOKIE_VAULT_TTL` | Max lifetime of a saved cookie bundle (max 720h) | `24h` |
 | `COOKIE_CAPTURE_TIMEOUT` | How long a login window may stay open (30s-15m) | `5m` |
 | `COOKIE_VAULT_PROFILE_TTL` | Max lifetime of a saved browser profile (1s-720h). Not extended by use | `168h` (7d) |
+| `COOKIE_VAULT_PROFILE_MAX_TOTAL_MB` | Cap on the combined size of all saved browser profiles on this node, all users together (64-102400). When full, a new login returns `profile_store_full`. Expired profiles are removed first | `2048` |
 | `COOKIE_VAULT_STDIO_CONSENT` | **STDIO-only.** Explicit opt-in to record the `session_capture` consent for `STDIO_USER_ID` at startup, which `site_login` and saved-login scraping require. Needs `COOKIE_VAULT_ENABLED=true` and `STDIO_USER_ID`, otherwise ignored with a warning. Grant-only-if-absent and audited like the other STDIO grants | `false` |
 | `STDIO_USER_ID` | **STDIO-only.** Names the single local user so the per-user regulated features (memory, analytics) work without OAuth. When set (+ the feature flag), consent for `memory`/`analytics` (never `workspace`) is auto-granted at startup — grant-only-if-absent (a later withdrawal is never re-granted), audited via `consent.grant`. Data keyed `(tenant=default, user=<value>)`. Allowed: `A-Za-z0-9._@-`, len 1–128, not `anonymous`. Ignored in HTTP mode | _(unset → `anonymous`)_ |
 

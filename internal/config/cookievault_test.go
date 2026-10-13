@@ -151,6 +151,46 @@ func TestConfigProfileTTL(t *testing.T) {
 	}
 }
 
+// TestConfigProfileMaxTotalMB pins COOKIE_VAULT_PROFILE_MAX_TOTAL_MB (issue
+// #775): 2048 by default, bounded to 64..102400, checked only when the vault is on.
+func TestConfigProfileMaxTotalMB(t *testing.T) {
+	cases := []struct {
+		name    string
+		env     map[string]string
+		want    int
+		wantErr string
+	}{
+		{"default", nil, 2048, ""},
+		{"custom", map[string]string{"COOKIE_VAULT_PROFILE_MAX_TOTAL_MB": "512"}, 512, ""},
+		{"too small", map[string]string{"COOKIE_VAULT_PROFILE_MAX_TOTAL_MB": "10"}, 0, "COOKIE_VAULT_PROFILE_MAX_TOTAL_MB"},
+		{"too big", map[string]string{"COOKIE_VAULT_PROFILE_MAX_TOTAL_MB": "102401"}, 0, "COOKIE_VAULT_PROFILE_MAX_TOTAL_MB"},
+		{"disabled vault ignores it", map[string]string{"COOKIE_VAULT_ENABLED": "false", "COOKIE_VAULT_PROFILE_MAX_TOTAL_MB": "10"}, 0, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv("COOKIE_VAULT_ENABLED", "true")
+			t.Setenv("COOKIE_VAULT_ENCRYPTION_KEY", vaultKeyA)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg, err := Load()
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.want != 0 && cfg.CookieVaultProfileMaxTotalMB != tc.want {
+				t.Fatalf("CookieVaultProfileMaxTotalMB = %d, want %d", cfg.CookieVaultProfileMaxTotalMB, tc.want)
+			}
+		})
+	}
+}
+
 // TestConfigCookieCaptureInHTTP pins the HTTP-mode capture opt-in (issue #775):
 // off by default, and honored only with the vault on and a display present.
 func TestConfigCookieCaptureInHTTP(t *testing.T) {

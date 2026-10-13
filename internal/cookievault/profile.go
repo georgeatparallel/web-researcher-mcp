@@ -23,6 +23,8 @@ const (
 	DefaultProfileTTL = 168 * time.Hour
 	// MaxProfilesPerSubject bounds disk use per user.
 	MaxProfilesPerSubject = 10
+	// DefaultProfileMaxTotalBytes bounds all stored archives on this node.
+	DefaultProfileMaxTotalBytes int64 = 2 << 30
 
 	profileMinGap   = 5 * time.Second
 	profileLockWait = 30 * time.Second
@@ -43,6 +45,7 @@ var (
 	ErrNoProfile        = errors.New("cookievault: no saved browser profile for this site")
 	ErrProfileBusy      = errors.New("cookievault: this site's browser profile is in use")
 	ErrTooManyProfiles  = errors.New("cookievault: too many saved browser profiles")
+	ErrProfileStoreFull = errors.New("cookievault: the saved browser profile storage is full")
 	errProfileKeyNeeded = errors.New("cookievault: profile encryption key is required")
 )
 
@@ -84,6 +87,8 @@ type ProfileStore struct {
 	wait     func(ctx context.Context, d time.Duration) error
 	minGap   time.Duration
 	lockWait time.Duration
+	// maxTotal caps the size of all archives in dir (every user on this node).
+	maxTotal int64
 
 	mu        sync.Mutex
 	keys      map[string]*keyState
@@ -117,10 +122,52 @@ func NewProfileStore(dir, hexKey string, ttl time.Duration) (*ProfileStore, erro
 	s := &ProfileStore{
 		dir: dir, workDir: work, gcm: gcm, ttl: ttl,
 		clock: time.Now, wait: sleepCtx, minGap: profileMinGap, lockWait: profileLockWait,
-		keys: map[string]*keyState{},
+		maxTotal: DefaultProfileMaxTotalBytes, keys: map[string]*keyState{},
 	}
 	s.sweep()
 	return s, nil
+}
+
+// WithMaxTotalBytes sets the cap on the combined size of all stored archives.
+// Zero or less keeps the default. Call it before the store is shared.
+func (s *ProfileStore) WithMaxTotalBytes(n int64) *ProfileStore {
+	if n > 0 {
+		s.maxTotal = n
+	}
+	return s
+}
+
+// archivesSize sums the archive sizes, skipping the one for exclude (an archive
+// about to be replaced). The caller holds s.mu.
+func (s *ProfileStore) archivesSize(exclude string) int64 {
+	var total int64
+	for _, k := range s.keysForPrefix("") {
+		if k == exclude {
+			continue
+		}
+		if info, err := os.Stat(s.path(k)); err == nil {
+			total += info.Size()
+		}
+	}
+	return total
+}
+
+// hasRoom reports whether an archive of size bytes for key fits under the cap.
+// When it does not fit, expired and unreadable archives are removed first. The
+// caller holds s.mu.
+func (s *ProfileStore) hasRoom(key string, size int64) bool {
+	if s.archivesSize(key)+size <= s.maxTotal {
+		return true
+	}
+	for _, k := range s.keysForPrefix("") {
+		if k == key {
+			continue
+		}
+		if _, ok := s.readMeta(k); !ok {
+			_ = os.Remove(s.path(k))
+		}
+	}
+	return s.archivesSize(key)+size <= s.maxTotal
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {
@@ -422,6 +469,12 @@ func (s *ProfileStore) Begin(ctx context.Context, sub Subject, host string) (*Pr
 		if s.countFor(sub) >= MaxProfilesPerSubject {
 			return nil, ErrTooManyProfiles
 		}
+		s.mu.Lock()
+		room := s.hasRoom(key, 1)
+		s.mu.Unlock()
+		if !room {
+			return nil, ErrProfileStoreFull
+		}
 	}
 	lease, err := s.begin(ctx, key, domain)
 	if err != nil {
@@ -567,6 +620,10 @@ func (s *ProfileStore) commit(ctx context.Context, l *ProfileLease) (ProfileSumm
 	if _, err := os.Stat(s.path(l.key)); errors.Is(err, os.ErrNotExist) && s.countPrefix(keyPrefix(l.key)) >= MaxProfilesPerSubject {
 		cleanup()
 		return ProfileSummary{}, ErrTooManyProfiles
+	}
+	if info, err := os.Stat(tmpName); err == nil && !s.hasRoom(l.key, info.Size()) {
+		cleanup()
+		return ProfileSummary{}, ErrProfileStoreFull
 	}
 	if err := os.Rename(tmpName, s.path(l.key)); err != nil {
 		cleanup()

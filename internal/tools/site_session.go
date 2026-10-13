@@ -220,7 +220,9 @@ func siteLoginFailure(ctx context.Context, deps Dependencies, start time.Time, k
 	case errors.Is(err, cookievault.ErrBrowserLaunch):
 		status, msg = "browser_launch_failed", "could not start a browser. Install Chrome, Edge or Brave, or set CHROME_PATH. In a container the browser sandbox may need CHROME_NO_SANDBOX=true"
 	case errors.Is(err, cookievault.ErrTooManyProfiles):
-		status, msg = "too_many_profiles", "too many sites have a saved sign-in; call site_logout for one you no longer need"
+		status, msg = "too_many_profiles", "too many sites have a saved sign-in"+savedProfileDomains(ctx, deps)+"; call site_logout for one you no longer need"
+	case errors.Is(err, cookievault.ErrProfileStoreFull):
+		status, msg = "profile_store_full", "the server's storage for saved sign-ins is full; call site_logout for a site you no longer need, or ask the operator to raise COOKIE_VAULT_PROFILE_MAX_TOTAL_MB"
 	case errors.Is(err, cookievault.ErrProfileTooLarge):
 		status, msg = "profile_too_large", "the browser profile is too large to store; nothing was saved"
 	case errors.Is(err, cookievault.ErrProfilesUnavailable):
@@ -232,6 +234,23 @@ func siteLoginFailure(ctx context.Context, deps Dependencies, start time.Time, k
 	auditToolCallQuery(ctx, deps, "site_login", time.Since(start), errors.New(status), "capture_"+status, "", map[string]any{"kind": kind})
 	recordSiteSession(deps, "login", kind, status)
 	return structuredResult(mustJSON(map[string]any{"status": status, "reason": msg}))
+}
+
+// savedProfileDomains returns " (a.com, b.com)" for the caller's saved browser
+// profiles, or "" when none can be listed. Domains only, no profile content.
+func savedProfileDomains(ctx context.Context, deps Dependencies) string {
+	subj, ok := vaultSubject(ctx)
+	if !ok || deps.ProfileStore == nil {
+		return ""
+	}
+	var names []string
+	for _, p := range deps.ProfileStore.List(ctx, subj) {
+		names = append(names, p.Domain)
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(names, ", ") + ")"
 }
 
 // registerSiteLogout registers the WRITE tool that removes a saved login (#241).

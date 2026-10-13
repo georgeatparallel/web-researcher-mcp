@@ -688,3 +688,67 @@ func TestProfileSweepRemovesDeadOwnerWorkDirs(t *testing.T) {
 		t.Fatal("work dir of a live process was removed")
 	}
 }
+
+func archiveSize(t *testing.T, s *ProfileStore, sub Subject, host string) int64 {
+	t.Helper()
+	_, key, err := resolve(sub, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(s.path(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Size()
+}
+
+func TestProfileStoreTotalQuota(t *testing.T) {
+	ctx := context.Background()
+	s := newTestProfileStore(t)
+	saveProfile(t, s, subjA, "one.com", "x")
+	size := archiveSize(t, s, subjA, "one.com")
+
+	// Full: a login for a new site is refused before the browser opens.
+	s.WithMaxTotalBytes(size)
+	if _, err := s.Begin(ctx, subjA, "two.com"); !errors.Is(err, ErrProfileStoreFull) {
+		t.Fatalf("Begin on a full store: got %v, want ErrProfileStoreFull", err)
+	}
+	// Renewing the sign-in for a saved site replaces its archive and still fits.
+	s.WithMaxTotalBytes(size + 1024)
+	saveProfile(t, s, subjA, "one.com", "y")
+
+	// Room at Begin, none at Commit (another login filled it): nothing is saved.
+	s.WithMaxTotalBytes(size * 3 / 2)
+	l, err := s.Begin(ctx, subjA, "two.com")
+	if err != nil {
+		t.Fatalf("Begin with room: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(l.Dir, "Cookies"), []byte("z"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Commit(ctx); !errors.Is(err, ErrProfileStoreFull) {
+		t.Fatalf("Commit on a full store: got %v, want ErrProfileStoreFull", err)
+	}
+	if got := s.List(ctx, subjA); len(got) != 1 || got[0].Domain != "one.com" {
+		t.Fatalf("saved profiles = %+v, want only one.com", got)
+	}
+	if left, _ := filepath.Glob(filepath.Join(s.dir, "*.tmp")); len(left) != 0 {
+		t.Fatalf("temp files left: %v", left)
+	}
+}
+
+func TestProfileStoreQuotaPrunesExpired(t *testing.T) {
+	ctx := context.Background()
+	s := newTestProfileStore(t)
+	now := time.Now()
+	s.clock = func() time.Time { return now }
+	saveProfile(t, s, subjA, "old.com", "x")
+	size := archiveSize(t, s, subjA, "old.com")
+	s.WithMaxTotalBytes(size + size/2)
+
+	now = now.Add(2 * time.Hour) // past the one-hour TTL
+	saveProfile(t, s, subjB, "new.com", "y")
+	if _, err := s.Acquire(ctx, subjA, "old.com"); !errors.Is(err, ErrNoProfile) {
+		t.Fatalf("expired archive survived: %v", err)
+	}
+}
