@@ -56,6 +56,10 @@ var excludedProfileFiles = map[string]bool{
 	"lockfile": true, "DevToolsActivePort": true,
 }
 
+// chromiumTempPrefix marks Chrome's atomic-write temp files, which come and go
+// while the browser shuts down.
+const chromiumTempPrefix = ".org.chromium."
+
 // ProfileMeta is stored inside the encrypted archive (authenticated with it).
 type ProfileMeta struct {
 	Version   int       `json:"v"`
@@ -114,6 +118,9 @@ func writeProfileArchive(dst io.Writer, gcm cipher.AEAD, aad []byte, root string
 	var files int
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if path != root && errors.Is(err, fs.ErrNotExist) {
+				return nil // vanished mid-walk (browser temp file)
+			}
 			return err
 		}
 		rel, err := filepath.Rel(root, path)
@@ -126,10 +133,18 @@ func writeProfileArchive(dst io.Writer, gcm cipher.AEAD, aad []byte, root string
 			}
 			return tw.WriteHeader(&tar.Header{Name: filepath.ToSlash(rel) + "/", Mode: 0o700, Typeflag: tar.TypeDir})
 		}
-		if !d.Type().IsRegular() || excludedProfileFiles[d.Name()] {
-			return nil // symlinks, sockets and lock files are never archived
+		if !d.Type().IsRegular() || excludedProfileFiles[d.Name()] || strings.HasPrefix(d.Name(), chromiumTempPrefix) {
+			return nil // symlinks, sockets, lock files and browser temp files are never archived
 		}
-		info, err := d.Info()
+		f, err := rootDir.Open(rel)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // vanished since the walk listed it
+		}
+		if err != nil {
+			return err
+		}
+		defer func() { _ = f.Close() }()
+		info, err := f.Stat()
 		if err != nil {
 			return err
 		}
@@ -141,11 +156,6 @@ func writeProfileArchive(dst io.Writer, gcm cipher.AEAD, aad []byte, root string
 		if err := tw.WriteHeader(&tar.Header{Name: filepath.ToSlash(rel), Mode: 0o600, Size: info.Size(), Typeflag: tar.TypeReg}); err != nil {
 			return err
 		}
-		f, err := rootDir.Open(rel)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = f.Close() }()
 		_, err = io.Copy(tw, io.LimitReader(f, info.Size()))
 		return err
 	})

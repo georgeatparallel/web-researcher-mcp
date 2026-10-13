@@ -396,6 +396,7 @@ func TestProfileArchiveExcludesCaches(t *testing.T) {
 	mk("Default/Service Worker/CacheStorage/x", "drop")
 	mk("Default/Local Storage/leveldb/x", "keep")
 	mk("SingletonLock", "drop")
+	mk("Default/.org.chromium.Chromium.AbC123", "drop")
 	if err := os.Symlink("/etc/passwd", filepath.Join(l.Dir, "Default", "link")); err != nil {
 		t.Fatal(err)
 	}
@@ -411,6 +412,7 @@ func TestProfileArchiveExcludesCaches(t *testing.T) {
 		"Default/Cookies": true, "Default/Local Storage/leveldb/x": true,
 		"Default/Cache/data_0": false, "Default/Code Cache/js/x": false, "Default/GPUCache/x": false,
 		"Default/Service Worker/CacheStorage/x": false, "SingletonLock": false, "Default/link": false,
+		"Default/.org.chromium.Chromium.AbC123": false,
 	} {
 		_, err := os.Lstat(filepath.Join(got.Dir, rel))
 		if (err == nil) != want {
