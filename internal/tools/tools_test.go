@@ -49,7 +49,9 @@ func TestMain(m *testing.M) {
 		_, _ = w.Write([]byte(`{"code":200,"status":20000,"data":{"content":""}}`))
 	}))
 	scraper.JinaReaderURL = stub.URL + "/"
+	stopDNS := installFakeDNS()
 	code := m.Run()
+	stopDNS()
 	stub.Close()
 	os.Exit(code)
 }

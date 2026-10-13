@@ -84,19 +84,19 @@ func (s *fakeLoginSession) Cookies(context.Context) ([]cookievault.Cookie, error
 func (s *fakeLoginSession) Done() <-chan struct{} { return s.done }
 func (s *fakeLoginSession) Close() error          { return nil }
 
-// useFakeDNS resolves every name in names to 127.0.0.1 through the process
-// resolver, so tests can use real registrable domains (an IP or localhost has
-// none) without network access. Tests that call it must not run in parallel.
-func useFakeDNS(t *testing.T, names ...string) {
-	t.Helper()
+// fakeDNSNames holds the names useFakeDNS currently maps to 127.0.0.1.
+var fakeDNSNames sync.Map
+
+// installFakeDNS replaces the process resolver once, for the whole test binary
+// (TestMain), so no test ever writes net.DefaultResolver while other tests'
+// dials read it. Names registered through useFakeDNS resolve to 127.0.0.1;
+// every other name goes to the original resolver. Returns a stop func.
+func installFakeDNS() func() {
 	pc, err := (&net.ListenConfig{}).ListenPacket(context.Background(), "udp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatal(err)
+		return func() {}
 	}
-	known := map[string]bool{}
-	for _, n := range names {
-		known[n+"."] = true
-	}
+	orig := net.DefaultResolver
 	go func() {
 		buf := make([]byte, 512)
 		for {
@@ -113,16 +113,28 @@ func useFakeDNS(t *testing.T, names ...string) {
 			if err != nil {
 				continue
 			}
+			name := strings.ToLower(q.Name.String())
+			_, fake := fakeDNSNames.Load(name)
+			var ips []net.IP
+			if fake {
+				ips = []net.IP{net.IPv4(127, 0, 0, 1)}
+			} else if addrs, lerr := orig.LookupIPAddr(context.Background(), strings.TrimSuffix(name, ".")); lerr == nil {
+				for _, a := range addrs {
+					ips = append(ips, a.IP)
+				}
+			}
 			rh := dnsmessage.Header{ID: hdr.ID, Response: true, Authoritative: true, RecursionAvailable: true}
-			if !known[strings.ToLower(q.Name.String())] {
+			if len(ips) == 0 && !fake {
 				rh.RCode = dnsmessage.RCodeNameError
 			}
 			b := dnsmessage.NewBuilder(nil, rh)
 			_ = b.StartQuestions()
 			_ = b.Question(q)
 			_ = b.StartAnswers()
-			if known[strings.ToLower(q.Name.String())] && q.Type == dnsmessage.TypeA {
-				_ = b.AResource(dnsmessage.ResourceHeader{Name: q.Name, Class: dnsmessage.ClassINET, TTL: 1}, dnsmessage.AResource{A: [4]byte{127, 0, 0, 1}})
+			for _, ip := range ips {
+				if v4 := ip.To4(); v4 != nil && q.Type == dnsmessage.TypeA {
+					_ = b.AResource(dnsmessage.ResourceHeader{Name: q.Name, Class: dnsmessage.ClassINET, TTL: 1}, dnsmessage.AResource{A: [4]byte(v4)})
+				}
 			}
 			out, err := b.Finish()
 			if err != nil {
@@ -131,17 +143,25 @@ func useFakeDNS(t *testing.T, names ...string) {
 			_, _ = pc.WriteTo(out, addr)
 		}
 	}()
-	prev := net.DefaultResolver
 	net.DefaultResolver = &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "udp", pc.LocalAddr().String())
 		},
 	}
-	t.Cleanup(func() {
-		net.DefaultResolver = prev
-		_ = pc.Close()
-	})
+	return func() { _ = pc.Close() }
+}
+
+// useFakeDNS makes every name in names resolve to 127.0.0.1 for this test, so
+// tests can use real registrable domains (an IP or localhost has none) without
+// network access. Needs installFakeDNS from TestMain.
+func useFakeDNS(t *testing.T, names ...string) {
+	t.Helper()
+	for _, n := range names {
+		key := strings.ToLower(n) + "."
+		fakeDNSNames.Store(key, struct{}{})
+		t.Cleanup(func() { fakeDNSNames.Delete(key) })
+	}
 }
 
 // loginSite is a login-gated origin: pages carry privateMarker only when the
