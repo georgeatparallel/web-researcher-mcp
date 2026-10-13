@@ -249,6 +249,9 @@ harness-21:
 harness-241:
 	bash scripts/harness-241.sh
 
+harness-775:
+	bash scripts/harness-775.sh
+
 clean:
 	rm -f $(BINARY) coverage.out coverage.html
 
