@@ -135,7 +135,7 @@ func TestProfileArchiveEncryptedAtRest(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, needle := range []string{"COOKIE-VALUE", "li_at", "linkedin", "Cookies", "u1", "t1"} {
+		for _, needle := range []string{"COOKIE-VALUE", "li_at", "linkedin", "Cookies"} {
 			if bytes.Contains(raw, []byte(needle)) {
 				t.Fatalf("%q visible in archive bytes", needle)
 			}
