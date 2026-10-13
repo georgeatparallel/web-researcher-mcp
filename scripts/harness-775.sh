@@ -74,20 +74,23 @@ run_gate "SAST (gosec) + pattern checks (rules 3, 6, 7, 12)" \
   "$OUT_DIR/775-02-sast.log" \
   bash -c '
     set -e
+    # `! cmd` never trips set -e, so use an explicit check.
+    none() { if "$@"; then echo "FOUND (see lines above)"; return 1; fi; }
     make sec
     for f in '"$NEW_FILES"'; do test -f "$f" || { echo "missing $f"; exit 1; }; done
     echo "--- no http.DefaultClient / os/exec / panic in new files ---"
-    ! grep -nE "http\.DefaultClient|\"os/exec\"|panic\(" '"$NEW_FILES"'
+    none grep -nE "http\.DefaultClient|\"os/exec\"|panic\(" '"$NEW_FILES"'
     echo "--- no TODO/FIXME in new files ---"
-    ! grep -nE "TODO|FIXME" '"$NEW_FILES"'
+    none grep -nE "TODO|FIXME" '"$NEW_FILES"'
     echo "--- no logging call touches cookie values/names or paths (rule 6) ---"
-    ! grep -nE "(slog|logger|Logger|log)\.[A-Za-z]+\(.*(\.Value|\.Name|[Cc]ookies|[Dd]ir|[Pp]ath)" '"$NEW_FILES"'
+    none grep -nE "(slog|logger|Logger|log)\.[A-Za-z]+\(.*(\.Value|\.Name|[Cc]ookies|[Dd]ir|[Pp]ath)" '"$NEW_FILES"'
     echo "--- profile mode never sets fingerprint overrides (rule 7) ---"
-    ! grep -nE "SetUserAgent|EmulationSetUserAgentOverride|EvalOnNewDocument|stealth\.|Incognito" internal/scraper/profile_browser.go
+    none grep -nE "SetUserAgent|EmulationSetUserAgentOverride|EvalOnNewDocument|stealth\.|Incognito" internal/scraper/profile_browser.go
     echo "--- never kill the browser straight after Close (rule 8) ---"
-    ! grep -nE "\.Kill\(\)" internal/scraper/profile_browser.go
-    echo "--- STDIO bootstrap never grants PurposeSessionCapture ---"
-    ! grep -n "PurposeSessionCapture" cmd/web-researcher-mcp/main.go
+    none grep -nE "\.Kill\(\)" internal/scraper/profile_browser.go
+    echo "--- STDIO grants PurposeSessionCapture only behind COOKIE_VAULT_STDIO_CONSENT ---"
+    none sh -c "grep -n PurposeSessionCapture cmd/web-researcher-mcp/main.go | grep -v stdio_env_optin"
+    grep -B1 stdio_env_optin cmd/web-researcher-mcp/main.go | grep -q CookieVaultStdioConsent
   '
 
 run_gate "Multi-instance isolation (rules 1, 2)" \
