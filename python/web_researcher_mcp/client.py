@@ -64,6 +64,8 @@ from web_researcher_mcp.models import (
     ScrapePageResponse,
     SearchAndScrapeResponse,
     SequentialSearchResponse,
+    SiteLoginResponse,
+    SiteLogoutResponse,
     VerifyCitationResponse,
     VerifyRecommendationResponse,
     WebSearchResponse,
@@ -883,6 +885,7 @@ class WebResearcherClient:
         max_length: int = None,
         mode: str = None,
         sessionId: str = None,
+        anonymous: bool = False,
     ) -> ScrapePageResponse:
         """Read a single URL and get back its content — web pages (including JavaScript-heavy sites), PDFs, Word/PowerPoint files, YouTube transcripts, Hacker News item/user/list pages (read natively via the HN API), GitHub README/file/gist pages (read natively via the GitHub API), and Bluesky posts and profiles (bsky"""
         d = await self._call_tool(
@@ -892,6 +895,7 @@ class WebResearcherClient:
                 "max_length": max_length,
                 "mode": mode,
                 "sessionId": sessionId,
+                "anonymous": anonymous,
             },
         )
         return ScrapePageResponse.from_dict(d)
@@ -969,6 +973,32 @@ class WebResearcherClient:
             },
         )
         return SequentialSearchResponse.from_dict(d)
+    async def site_login(
+        self,
+        url: str,
+        use_login_window: bool = False,
+    ) -> SiteLoginResponse:
+        """Sign in to a website so scrape_page can read pages that need a login"""
+        d = await self._call_tool(
+            "site_login",
+            {
+                "url": url,
+                "use_login_window": use_login_window,
+            },
+        )
+        return SiteLoginResponse.from_dict(d)
+    async def site_logout(
+        self,
+        domain: str,
+    ) -> SiteLogoutResponse:
+        """Forget the saved login for a site (saved earlier with site_login): deletes the stored cookies and the saved browser profile for that site's registrable domain"""
+        d = await self._call_tool(
+            "site_logout",
+            {
+                "domain": domain,
+            },
+        )
+        return SiteLogoutResponse.from_dict(d)
     async def verify_citation(
         self,
         citation: str,
@@ -1742,6 +1772,7 @@ class SyncWebResearcherClient:
         max_length: int = None,
         mode: str = None,
         sessionId: str = None,
+        anonymous: bool = False,
     ) -> ScrapePageResponse:
         return self._run(
             self._async_client.scrape_page(
@@ -1749,6 +1780,7 @@ class SyncWebResearcherClient:
             max_length=max_length,
             mode=mode,
             sessionId=sessionId,
+            anonymous=anonymous,
             )
         )
     def search_and_scrape(
@@ -1817,6 +1849,26 @@ class SyncWebResearcherClient:
             sessionId=sessionId,
             sessionSummary=sessionSummary,
             totalStepsEstimate=totalStepsEstimate,
+            )
+        )
+    def site_login(
+        self,
+        url: str,
+        use_login_window: bool = False,
+    ) -> SiteLoginResponse:
+        return self._run(
+            self._async_client.site_login(
+            url=url,
+            use_login_window=use_login_window,
+            )
+        )
+    def site_logout(
+        self,
+        domain: str,
+    ) -> SiteLogoutResponse:
+        return self._run(
+            self._async_client.site_logout(
+            domain=domain,
             )
         )
     def verify_citation(

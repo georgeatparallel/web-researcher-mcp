@@ -131,6 +131,7 @@ Extract content from a URL, supporting web pages, documents, YouTube videos, Hac
 | `mode` | string | no | `full` | `full` (cleaned readable text), `preview` (first ~5000 bytes), `raw` (verbatim unsanitized bytes — see [Raw Mode](#raw-mode)) |
 | `max_length` | int | no | 50000 | Bytes. Capped at 5,000,000 (5 MB) for all modes; in `preview` mode it is forced to 5000. Applies to `raw` mode as an `io.LimitReader` cap on the fetched bytes |
 | `sessionId` | string | no | — | Link to a `sequential_search` session |
+| `anonymous` | bool | no | `false` | `true` skips any saved `site_login` (cookies or browser profile) and reads the page as a signed-out visitor |
 
 ### Output Schema
 
@@ -146,6 +147,9 @@ type ScrapeOutput struct {
     SizeCategory    string    `json:"sizeCategory"`   // small, medium, large, very_large
     Citation        *Citation `json:"citation"`       // always present
     Raw             bool      `json:"raw,omitempty"`  // true only in raw mode; omitted otherwise
+    Authenticated   bool      `json:"authenticated,omitempty"` // true only when a saved site_login (cookies or browser profile) was used (#241, #775), which does not prove the session is still signed in; such results are never cached
+    LoginRequired   bool      `json:"loginRequired,omitempty"` // true when the page looks like a sign-in page, not the content asked for (heuristic, #241); present only when site_login is available
+    LoginHint       string    `json:"loginHint,omitempty"`     // next step when loginRequired: call site_login (use_login_window=true to sign in again if a saved login was used)
     ExtractedBy     string    `json:"extractedBy,omitempty"` // extraction tier: markdown|stealth|jina|html|browser|exa:cached|exa:crawled; omitted when unknown
     ExtractionQuality string  `json:"extractionQuality,omitempty"` // complete when the pipeline returned a confident extraction; partial when every tier was exhausted and the best-quality candidate was returned instead. Never an error. Omitted in raw mode.
     WordCount         int     `json:"wordCount,omitempty"`         // words in the extracted content (#358); orthogonal to ExtractionQuality — a "complete" extraction can still be a thin paywall/bot-wall stub. Omitted in raw mode.
@@ -273,6 +277,14 @@ In `raw` mode the output additionally carries `"raw": true`, and `contentType` i
 **Forum engagement signals (#247).** For Reddit posts where the HTML extraction tier ran, the response carries a `forumSignals` object: `platform` (`"reddit"`), `upvotes` (vote count from JSON-LD `interactionStatistic`), `comments` (comment count), `datePublished` (ISO 8601), `authorName` (original poster), and `credibilityNote` (set when `upvotes < 20`, noting vote-manipulation risk). The field is **omitted entirely** for non-Reddit/non-Bluesky URLs, `raw` mode, and any non-HTML extraction tier (markdown, browser, document, YouTube, Twitter) — never `null`, only present-or-absent. For Twitter/X tweets (`contentType: "twitter"`), engagement signals (likes, retweets, replies, quotes, views) are embedded in the plain-text `content` string by the FxTwitter path — they are not surfaced as a separate structured field. For Bluesky posts (bsky.app), `forumSignals` carries `platform: "bluesky"`, `upvotes` (like count), `comments` (reply count), and `authorName` (displayName from the AT Protocol author record) — read natively via `app.bsky.feed.getPostThread`, not extracted from HTML (#285). When available, `topComments` carries up to 5 top comments (by score descending) fetched from the Reddit shreddit endpoint — each with `author`, `score`, `body` (plain text, max 500 chars; `[deleted]`/`[removed]` bodies are skipped), `permalink`, and `created`. The comment fetch is best-effort: a timeout (5 s), 429, or parse error silently omits the field without affecting the rest of the result.
 
 **Structured data (#46).** When the page embeds machine-readable metadata, the response carries a `structuredData` object alongside `content`: `jsonLd` (each `<script type="application/ld+json">` block, kept verbatim — invalid JSON is skipped, never failing the scrape), `openGraph` (`og:*`/`article:*` meta, keys keep their prefix), and `citation` (Highwire `citation_*` meta — DOI, authors, journal). The whole object is omitted when no such markup is present, and each sub-field is omitted when empty. It is produced by the HTML-extraction tiers only (absent for `raw` mode, PDFs, YouTube, and markdown-tier results), is independently size-bounded so a pathological page cannot blow the response budget, and is **untrusted external data** under the same trust boundary as `content`.
+
+**Saved logins (#241, #775).** When the cookie vault is enabled and the caller has saved a login for the page's site with `site_login` and consented to `session_capture`, `scrape_page` uses it automatically and sets `authenticated: true`. A saved login is one of two kinds. A **browser profile** (from the login window) is reopened headless as the same private browser the user signed in with, so the site sees one steady browser. It is tried first. A **cookie bundle** (read from the user's own browser) is sent as cookies. Cookies go only to that site's registrable domain (never to a redirect on another host) and never over plain http if marked `Secure`. A profile scrape stays on the saved site: navigation to another domain is blocked. Scrapes with a saved login skip the shared cache, the negative cache, the artifact store, the native API routes (documents excepted) and the Jina and Exa cloud tiers, and are returned inline. Signed-in content is the user's private data and, like every page, untrusted: a page can hide instructions aimed at the model, so the `authenticated` field tells the caller not to follow them and not to forward the content unless the user asks. Set `anonymous: true` to skip the saved login and read the page as a signed-out visitor. Without a saved login, consent or an identified user, the scrape runs anonymously as before.
+
+**Profile scrapes (#775).** Scrapes of one profile run one at a time and at least 5 seconds apart. A scrape that waits more than 30 seconds for the profile returns a retryable `profile_busy` error. A login window holds the profile for as long as it is open, so wait for it to close. `mode: "raw"` is refused when a saved profile exists for the site: use `mode: "full"` or `"preview"`, or set `anonymous: true`. After a successful scrape the profile is saved again so refreshed cookies carry over. After a failed scrape or a login wall it is discarded, so the stored profile is not changed. A profile expires `COOKIE_VAULT_PROFILE_TTL` after `site_login` and is not extended by use. A profile scrape stays on the saved site: if the page goes to another site, the scrape stops with a non-retryable `validation` error that names the host (re-run `site_login` if it was a sign-in page, or scrape the other site with `anonymous: true`). Requests the page makes to private or internal addresses are blocked.
+
+**Sites that block replayed sessions.** Some sites with strong bot detection, LinkedIn in live tests, accept copied cookies for only one or two scrapes. Use `site_login` with `use_login_window=true` for them: the saved browser profile stayed signed in for hours in live tests. Session life beyond that is not proven. When a saved login stops working, `loginRequired` is how you notice.
+
+**Login-wall signal (#241).** When `site_login` is available, a full-mode scrape that returns a thin page (under 150 words) that looks like a sign-in page sets `loginRequired: true` and a `loginHint`. The check is a heuristic: the title names sign-in, or the text asks for a password next to a sign-in prompt. A request for a login URL is never flagged. With a saved login the hint says it looks expired and to call `site_login` again (with `use_login_window=true` for a profile); without, it says to call `site_login`. A login-required error (`kind: auth_required`) carries the same hint. It can miss walls that render with scripts and can flag a thin page that mentions sign-in, so treat it as a prompt to check, not proof. Raw mode does not run the check.
 
 **Extraction provenance (`extractedBy`).** When known, the response names the tier that produced the content: `markdown`, `stealth`, `jina`, `html`, `browser`, `github:raw`/`github:contents-api`/`github:gist-api`, or — for the paid Exa fallback — `exa:cached` / `exa:crawled`. It lets a caller see whether content came from a free local tier or the metered Exa `/contents` API (Tier 5, present only when `EXA_API_KEY` is set). Omitted when unknown (e.g. document/YouTube routes).
 
@@ -404,6 +416,7 @@ Note: twitter.com and x.com are **not** in the SPA list — they use a dedicated
 ### Cache
 - Key: SHA-256 of (`url` + `mode` + `max_length`) — `max_length` is part of the key so a larger request never serves a shorter cached body
 - TTL: 1 hour
+- Not used for vault-backed (`authenticated: true`) scrapes: they neither read nor write the cache.
 
 ### Error Taxonomy (`internal/scraper/errors.go`)
 
@@ -1997,6 +2010,89 @@ Requires an authenticated user and recorded consent for the `monitoring` purpose
 
 ---
 
+## Tool 35: `site_login`
+
+**Opt-in, consent-gated (#241, #775). Registered only when `COOKIE_VAULT_ENABLED=true` and a browser is available: in STDIO mode by default, in HTTP mode only with `COOKIE_CAPTURE_IN_HTTP=true` and a display on the server host.** A **write** tool (stores cookies or a browser profile), **not idempotent**, not open-world.
+
+### Purpose
+
+Let `scrape_page` read pages behind your login. In STDIO mode, by default it reads only that site's cookies from your own running, signed-in Chrome, Edge or Brave (`kind: cookies`). If that browser is unreachable, or you are not signed in there, it returns a status with the fix and opens nothing. With `use_login_window` it opens a separate window: you log in by hand (2FA and CAPTCHA included) and close the window. The sign-in is saved as an encrypted private browser profile (`kind: profile`) that `scrape_page` reopens headless. Use this for LinkedIn and other sites that reject copied cookies. In HTTP mode only the login window exists, and it opens on the machine running the server. Your password is never saved. Use it only on sites whose terms of service allow automated access on your behalf. Some sites, such as LinkedIn, forbid it.
+
+### Input Schema
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `url` | string | yes | http(s) login page. Must have a registrable domain (no IP addresses, `localhost` or bare public suffixes) and no embedded credentials. Private and internal hosts are refused unless `ALLOW_PRIVATE_IPS=true` |
+| `use_login_window` | boolean | no | Default `false`. Set `true` to open a separate visible window and save the sign-in as a private browser profile. Use it for LinkedIn and other sites that reject copied cookies, if you do not use Chrome, Edge or Brave, or cannot turn on remote debugging. Always used over HTTP. The window has none of your existing sessions, so you sign in by hand |
+
+### Output Schema
+
+```go
+type SiteLoginOutput struct {
+    Status      string `json:"status"`                // "ok" | "no_consent" | "unavailable" | "browser_unavailable" | "not_signed_in" | "busy" | "timeout" | "invalid_url" | "blocked" | "nothing_captured" | "profile_not_saved" | "browser_launch_failed" | "too_many_profiles" | "profile_store_full" | "profile_too_large" | "profiles_unavailable" | "failed"
+    Reason      string `json:"reason,omitempty"`
+    Domain      string `json:"domain,omitempty"`      // registrable domain the login is scoped to
+    CookieCount int    `json:"cookieCount,omitempty"` // kind "cookies" only; count only, names and values are never returned
+    CapturedAt  string `json:"capturedAt,omitempty"`  // RFC3339
+    ExpiresAt   string `json:"expiresAt,omitempty"`   // RFC3339; never later than COOKIE_VAULT_TTL (cookies) or COOKIE_VAULT_PROFILE_TTL (profile) from capture
+    Source      string `json:"source,omitempty"`      // "browser" (read from your running browser) | "login_window"
+    Kind        string `json:"kind,omitempty"`        // what was saved: "cookies" | "profile"
+}
+```
+
+### Behavior
+
+Requires an identified user and recorded consent for the `session_capture` purpose, which is never granted by default (HTTP: host asserts it via `POST /admin/consent`; STDIO: the operator sets `COOKIE_VAULT_STDIO_CONSENT=true`); otherwise returns `unavailable` / `no_consent` and opens no browser. The host is checked for SSRF before any browser is touched.
+
+**Browser attach (STDIO, default, `kind: cookies`).** If a Chromium-family browser has remote debugging on (`chrome://inspect/#remote-debugging`, Chrome 144+), the server connects to its local debugging port, which makes the browser show an Allow prompt. After you click Allow it reads cookies, keeps only those of the site's registrable domain, and disconnects. It never launches or closes your browser. It waits up to one minute for the click. If the browser is closed, debugging is off or you decline, it returns `browser_unavailable`. If you hold no cookies for the site, it returns `not_signed_in`. Neither opens a window; the reason names the steps and the `use_login_window` option. HTTP mode never attaches to a browser: it always uses the login window.
+
+**Login window (`use_login_window=true`, or always over HTTP, `kind: profile`).** Opens a visible window on the machine that runs the server, on a private profile (the saved one for the site, if any). The call blocks until you close the window or `COOKIE_CAPTURE_TIMEOUT` passes (`timeout`: nothing is saved). After the window closes, the server shuts the browser down cleanly, reopens the profile headless to check the sign-in reached disk, and stores the profile AES-256-GCM encrypted. If the site only set session cookies (for example you did not tick "remember me"), or the check fails, it returns `profile_not_saved` and stores nothing. If you made no cookies for the site, it returns `nothing_captured`. If the window closes with no new persistent cookie since it opened (the site set only tracking cookies, so you did not sign in), it returns `not_signed_in` and stores nothing; this check is skipped when you sign in again over an existing profile. `browser_launch_failed` means the browser could not start. A subject can hold at most 10 profiles (`too_many_profiles`); when all saved profiles on the node reach `COOKIE_VAULT_PROFILE_MAX_TOTAL_MB` it returns `profile_store_full`; a profile over the size cap returns `profile_too_large`; a profile for the site that is in use right now returns `busy`; `profiles_unavailable` means no profile store is configured. At most `MAX_CONCURRENT_CAPTURES` windows run at once (`busy`). The work directory is temporary and deleted on every exit path. Profiles expire after `COOKIE_VAULT_PROFILE_TTL`.
+
+Both kinds are stored per (tenant, user, registrable domain) and a new login replaces any older login of the other kind for that domain. Cookie bundles and profiles are included in data-subject export (counts and summaries only, never values) and erasure. The call is audited and counted (`mcp_site_session_events_total{event,kind,status}`) without cookie values, paths or user labels.
+
+### Cache
+
+- Not cached.
+
+---
+
+## Tool 36: `site_logout`
+
+**Opt-in (#241). Registered whenever the cookie vault is enabled.** A **write** tool (deletes stored cookies and browser profiles), **idempotent**, not open-world.
+
+### Purpose
+
+Forget a saved login. Deletes the stored cookies and the saved browser profile for a site's registrable domain.
+
+### Input Schema
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `domain` | string | yes | Hostname (`example.com`) or a URL on it. Reduced to the registrable domain |
+
+### Output Schema
+
+```go
+type SiteLogoutOutput struct {
+    Status  string `json:"status"`           // "ok" | "unavailable"
+    Reason  string `json:"reason,omitempty"`
+    Domain  string `json:"domain,omitempty"` // registrable domain that was addressed
+    Removed        bool `json:"removed"`        // false when nothing was saved (not an error)
+    RemovedCookies bool `json:"removedCookies"` // a cookie bundle was deleted
+    RemovedProfile bool `json:"removedProfile"` // a browser profile was deleted
+}
+```
+
+### Behavior
+
+Requires an identified user. Needs no consent: erasure is always allowed. Scrapes made with a saved login never write to the shared cache, so there is no cached page content to clear. A scrape that is using the profile right now finishes, but its result is not saved back.
+
+### Cache
+
+- Not cached.
+
+---
+
 ## Cross-Cutting Concerns
 
 ### Timeouts
@@ -2106,7 +2202,7 @@ Full details: see `docs/ERROR_HANDLING.md` — covers the three-layer architectu
 
 ### Tool Annotations (MCP Protocol)
 
-Every tool declares annotations for client consumption (`readOnlyAnnotations(idempotent, openWorld)` for read tools, `writeAnnotations(idempotent)` for the four write tools (`memory_save`, `workspace_contribute`, `archive_source`, `monitor_query_save`) — all in `internal/tools/registry.go`). CI enforces tool↔doc consistency via `TestAllToolsHaveAnnotations`, `TestToolsDocMatchesRegistry`, `TestOutputSchemaMatchesResponse`, and `TestToolDescriptionQuality` (`internal/tools/metadata_test.go`) — including on docs-only PRs via the standalone `docs-drift` CI job. No tool is `Destructive` — deletion is the `/admin/data` erasure endpoint, never a tool flag (see `docs/DEPLOYMENT.md`).
+Every tool declares annotations for client consumption (`readOnlyAnnotations(idempotent, openWorld)` for read tools, `writeAnnotations(idempotent)` for the write tools (`memory_save`, `workspace_contribute`, `archive_source`, `monitor_query_save`, `site_login`, `site_logout`) — all in `internal/tools/registry.go`). CI enforces tool↔doc consistency via `TestAllToolsHaveAnnotations`, `TestToolsDocMatchesRegistry`, `TestOutputSchemaMatchesResponse`, and `TestToolDescriptionQuality` (`internal/tools/metadata_test.go`) — including on docs-only PRs via the standalone `docs-drift` CI job. No tool is `Destructive` — deletion is the `/admin/data` erasure endpoint, never a tool flag (see `docs/DEPLOYMENT.md`).
 
 | Tool | ReadOnly | Idempotent | OpenWorld |
 |------|----------|------------|-----------|

@@ -767,3 +767,22 @@ func TestNegCacheShortCircuitsSecondScrape(t *testing.T) {
 		t.Errorf("second call should be served from negative cache (no new origin hits): first=%d second=%d", first, second)
 	}
 }
+
+// A saved profile that is sent to another site is not reported as an expired
+// sign-in or as a bad URL: the message names the host and the two ways forward.
+func TestScrapeErrorResponse_ProfileOffSite(t *testing.T) {
+	t.Parallel()
+	err := &scraper.ScrapeError{
+		Kind: scraper.ErrValidation, Cause: scraper.ErrProfileOffSite,
+		Message: "the page went to accounts.other.org", URL: "https://www.example.com/feed",
+	}
+	text := scrapeErrorResponse(err, "https://www.example.com/feed").Content[0].(*mcp.TextContent).Text
+	for _, want := range []string{"accounts.other.org", "use_login_window=true", "anonymous=true", `"retryable":false`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("response missing %q: %s", want, text)
+		}
+	}
+	if strings.Contains(text, "Provide a valid public http(s) URL") {
+		t.Errorf("off-site message must not blame the URL: %s", text)
+	}
+}

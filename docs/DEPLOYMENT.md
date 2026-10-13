@@ -551,7 +551,8 @@ DAILY_QUOTA_PER_TENANT=10000
 |----------|-------------|---------|
 | `ALLOW_PRIVATE_IPS` | Disable SSRF protection | `false` |
 | `ALLOWED_DOMAINS` | Domain whitelist (comma-separated) | — (all allowed) |
-| `CHROME_PATH` | Custom Chrome/Chromium binary path; set to `"disabled"` to turn the browser tier off entirely (no autodetect, no download) | auto-detect |
+| `CHROME_NO_SANDBOX` | `true` runs the saved-login browsers (`site_login` window, profile scrapes) without Chrome's sandbox. Only for containers that cannot run it. The bundled images set it. Running as root always disables the sandbox | `false` |
+| `CHROME_PATH` | Custom Chrome/Chromium binary path; set to `"disabled"` to turn the browser tier off entirely (no autodetect, no download). `site_login` opens the installed Chrome (then Edge, Chromium) when unset | auto-detect |
 | `BROWSER_IDLE_TIMEOUT` | Auto-close the browser tier's Chromium process after this long with no browser-tier scrape (#460), so one scrape doesn't pin Chromium (and its Dock icon on macOS) for the server's full lifetime; a later scrape transparently relaunches it. `0` disables the idle-close timer | `5m` |
 | `JINA_READER_DISABLED` | Set `true` to turn off the Jina Reader scrape tier (r.jina.ai) entirely, e.g. for hardened deploys or network-free tests | `false` |
 | `MAX_SCRAPE_CONCURRENCY` | Parallel scrape limit for the fast tiers (markdown/stealth/jina/html/exa) | `5` |
@@ -578,11 +579,19 @@ Regulated features (per-user personal data; each activates the consent subsystem
 | `USER_ANALYTICS_ENABLED` | Opt-in per-user usage analytics (`get_my_analytics`). Consent-gated on the `analytics` purpose | `false` |
 | `WORKSPACES_ENABLED` | Opt-in shared research workspaces (`workspace_contribute`/`workspace_read` + `/admin/workspace/members`). Consent-gated on the `workspace` purpose; membership host-managed | `false` |
 | `WORKSPACE_TTL` | Max lifetime of shared-workspace data | `720h` (30d) |
+| `COOKIE_VAULT_ENABLED` | Opt-in encrypted login vault (#241, #775): `site_login`/`site_logout` and signed-in `scrape_page`. Consent-gated on the `session_capture` purpose (never auto-granted). Needs `COOKIE_VAULT_ENCRYPTION_KEY` (64 hex, different from `CACHE_ENCRYPTION_KEY`). The login window needs a display on the server host | `false` |
+| `COOKIE_CAPTURE_IN_HTTP` | **HTTP-only.** Lets `site_login` open a visible login window on the server host's display. Self-hosted or single-user use only: whoever can call the tool opens a window on that machine. HTTP mode never reads a browser over a debug port. Ignored without `COOKIE_VAULT_ENABLED=true` or a display | `false` |
+| `COOKIE_VAULT_ENCRYPTION_KEY` | 64 hex characters (32 bytes) that encrypt saved logins. Must differ from `CACHE_ENCRYPTION_KEY`. Required when the vault is enabled | _(unset)_ |
+| `COOKIE_VAULT_TTL` | Max lifetime of a saved cookie bundle (max 720h) | `24h` |
+| `COOKIE_CAPTURE_TIMEOUT` | How long a login window may stay open (30s-15m) | `5m` |
+| `COOKIE_VAULT_PROFILE_TTL` | Max lifetime of a saved browser profile (1s-720h). Not extended by use | `168h` (7d) |
+| `COOKIE_VAULT_PROFILE_MAX_TOTAL_MB` | Cap on the combined size of all saved browser profiles on this node, all users together (64-102400). When full, a new login returns `profile_store_full`. Expired profiles are removed first | `2048` |
+| `COOKIE_VAULT_STDIO_CONSENT` | **STDIO-only.** Explicit opt-in to record the `session_capture` consent for `STDIO_USER_ID` at startup, which `site_login` and saved-login scraping require. Needs `COOKIE_VAULT_ENABLED=true` and `STDIO_USER_ID`, otherwise ignored with a warning. Grant-only-if-absent and audited like the other STDIO grants | `false` |
 | `STDIO_USER_ID` | **STDIO-only.** Names the single local user so the per-user regulated features (memory, analytics) work without OAuth. When set (+ the feature flag), consent for `memory`/`analytics` (never `workspace`) is auto-granted at startup — grant-only-if-absent (a later withdrawal is never re-granted), audited via `consent.grant`. Data keyed `(tenant=default, user=<value>)`. Allowed: `A-Za-z0-9._@-`, len 1–128, not `anonymous`. Ignored in HTTP mode | _(unset → `anonymous`)_ |
 
 > Enabling any regulated feature activates the consent subsystem automatically — there is no standalone `CONSENT_ENABLED` knob. Consent is asserted by the host (via `POST /admin/consent`) and recorded/verified/honored by the server. See `docs/SECURITY.md` and `docs/SECURITY_AND_COMPLIANCE.md`.
 >
-> **STDIO single-user exception:** STDIO has no OAuth, so by default the user is `anonymous` and the per-user regulated features (memory, analytics) stay off (fail-closed). Setting `STDIO_USER_ID` is the operator asserting their own identity — in that single-user model the host, operator, and subject are the same person, so the server auto-grants consent for `memory`/`analytics` (never `workspace`) at startup. The grant is **grant-only-if-absent**: a consent decision the user later changes (e.g. a withdrawal recorded out-of-band) is never overwritten on restart, and each grant emits an audited `consent.grant` event.
+> **STDIO single-user exception:** STDIO has no OAuth, so by default the user is `anonymous` and the per-user regulated features (memory, analytics) stay off (fail-closed). Setting `STDIO_USER_ID` is the operator asserting their own identity — in that single-user model the host, operator, and subject are the same person, so the server auto-grants consent for `memory`/`analytics` (never `workspace`) at startup; `session_capture` is granted only if you also set `COOKIE_VAULT_STDIO_CONSENT=true`. The grant is **grant-only-if-absent**: a consent decision the user later changes (e.g. a withdrawal recorded out-of-band) is never overwritten on restart, and each grant emits an audited `consent.grant` event.
 
 ### Observability
 

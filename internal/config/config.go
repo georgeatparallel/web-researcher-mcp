@@ -7,30 +7,51 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 )
 
 type Config struct {
-	GoogleAPIKey                  string
-	GoogleCX                      string
-	Search                        SearchConfig
-	Port                          int
-	OAuth                         OAuthConfig
-	AllowedOrigins                []string
-	CORSStrict                    bool
-	HTTP                          HTTPConfig
-	CacheDir                      string
-	CacheMaxMemoryMB              int
-	CacheEncryptionKey            string
-	CacheEncryptionKeyPrev        string
+	GoogleAPIKey           string
+	GoogleCX               string
+	Search                 SearchConfig
+	Port                   int
+	OAuth                  OAuthConfig
+	AllowedOrigins         []string
+	CORSStrict             bool
+	HTTP                   HTTPConfig
+	CacheDir               string
+	CacheMaxMemoryMB       int
+	CacheEncryptionKey     string
+	CacheEncryptionKeyPrev string
+	// Cookie vault (#241). Only meaningful when Features.CookieVault is true; Load
+	// validates the key (64 hex, distinct from the cache keys) and the bounds.
+	CookieVaultKey        string
+	CookieVaultTTL        time.Duration // max lifetime of any stored cookie bundle
+	MaxConcurrentCaptures int           // simultaneous headed login captures
+	CookieCaptureTimeout  time.Duration // how long a site_login window may stay open
+	// CookieVaultProfileTTL is the absolute lifetime of a saved browser profile
+	// (COOKIE_VAULT_PROFILE_TTL, issue #775).
+	CookieVaultProfileTTL time.Duration
+	// CookieVaultProfileMaxTotalMB caps the combined size of all saved browser
+	// profiles on this node (COOKIE_VAULT_PROFILE_MAX_TOTAL_MB, issue #775).
+	CookieVaultProfileMaxTotalMB int
+	// CookieCaptureInHTTP lets site_login run in HTTP mode, where the login
+	// window opens on the server's own display (COOKIE_CAPTURE_IN_HTTP, #775).
+	CookieCaptureInHTTP bool
+	// CookieVaultStdioConsent is the operator's explicit opt-in to record the
+	// session_capture consent for STDIO_USER_ID at startup (COOKIE_VAULT_STDIO_CONSENT).
+	// Honored only with the vault enabled, in STDIO mode, with a valid STDIO_USER_ID.
+	CookieVaultStdioConsent       bool
 	CacheIsolation                string
 	RedisURL                      string
 	RateLimit                     RateLimitConfig
 	AllowPrivateIPs               bool
 	AllowedDomains                []string
 	ChromePath                    string
+	ChromeNoSandbox               bool // CHROME_NO_SANDBOX: run saved-login browsers without Chrome's sandbox (containers)
 	JinaDisabled                  bool
 	BrowserIdleTimeout            time.Duration
 	MaxScrapeConcurrency          int
@@ -108,6 +129,7 @@ type FeatureConfig struct {
 	UserAnalytics bool // #92 opt-in per-user analytics
 	Workspaces    bool // #96 opt-in shared research workspaces
 	Monitoring    bool // #273 opt-in saved query-monitor persistence
+	CookieVault   bool // #241 opt-in encrypted cookie vault for login-gated scraping
 
 	// MemoryRetention bounds how long a saved memory lives before auto-expiry
 	// (#88). 0 → the store's default (90 days). "Data doesn't exist after TTL"
@@ -126,7 +148,7 @@ type FeatureConfig struct {
 // RegulatedEnabled reports whether any consent-gated feature is on, which is
 // the sole trigger for activating the consent subsystem.
 func (f FeatureConfig) RegulatedEnabled() bool {
-	return f.Memory || f.UserAnalytics || f.Workspaces || f.Monitoring
+	return f.Memory || f.UserAnalytics || f.Workspaces || f.Monitoring || f.CookieVault
 }
 
 type AuditConfig struct {
@@ -379,6 +401,42 @@ func Load() (*Config, error) {
 		errs = append(errs, "CACHE_ENCRYPTION_KEY_PREV must be exactly 64 hex characters")
 	}
 
+	// Cookie vault (#241): the vault key protects session credentials, so it must
+	// never equal a cache key (a cache-key leak or rotation must not expose or
+	// invalidate stored logins).
+	cookieVaultEnabled := envBool("COOKIE_VAULT_ENABLED", false)
+	cookieVaultKey := os.Getenv("COOKIE_VAULT_ENCRYPTION_KEY")
+	cookieVaultTTL := envDuration("COOKIE_VAULT_TTL", maxCookieVaultTTLDefault)
+	maxCaptures := envInt("MAX_CONCURRENT_CAPTURES", 1)
+	captureTimeout := envDuration("COOKIE_CAPTURE_TIMEOUT", 5*time.Minute)
+	profileTTL := envDuration("COOKIE_VAULT_PROFILE_TTL", defaultProfileTTL)
+	profileMaxTotalMB := envInt("COOKIE_VAULT_PROFILE_MAX_TOTAL_MB", defaultProfileMaxTotalMB)
+	if cookieVaultEnabled {
+		switch {
+		case cookieVaultKey == "":
+			errs = append(errs, "COOKIE_VAULT_ENCRYPTION_KEY is required when COOKIE_VAULT_ENABLED=true")
+		case !isHex64(cookieVaultKey):
+			errs = append(errs, "COOKIE_VAULT_ENCRYPTION_KEY must be exactly 64 hex characters")
+		case strings.EqualFold(cookieVaultKey, encKey) || strings.EqualFold(cookieVaultKey, encKeyPrev):
+			errs = append(errs, "COOKIE_VAULT_ENCRYPTION_KEY must differ from CACHE_ENCRYPTION_KEY")
+		}
+		if cookieVaultTTL <= 0 || cookieVaultTTL > maxCookieVaultTTL {
+			errs = append(errs, "COOKIE_VAULT_TTL must be between 1s and 720h")
+		}
+		if profileTTL <= 0 || profileTTL > maxCookieVaultTTL {
+			errs = append(errs, "COOKIE_VAULT_PROFILE_TTL must be between 1s and 720h")
+		}
+		if profileMaxTotalMB < 64 || profileMaxTotalMB > 102400 {
+			errs = append(errs, "COOKIE_VAULT_PROFILE_MAX_TOTAL_MB must be between 64 and 102400")
+		}
+		if maxCaptures < 1 || maxCaptures > 5 {
+			errs = append(errs, "MAX_CONCURRENT_CAPTURES must be between 1 and 5")
+		}
+		if captureTimeout < 30*time.Second || captureTimeout > 15*time.Minute {
+			errs = append(errs, "COOKIE_CAPTURE_TIMEOUT must be between 30s and 15m")
+		}
+	}
+
 	// ADMIN_API_KEY gates every /admin/* endpoint (cache flush, session flush,
 	// GDPR data-subject rights, tenant analytics, workspace membership). The
 	// legacy CACHE_ADMIN_KEY name is still accepted for backward compatibility
@@ -443,6 +501,31 @@ func Load() (*Config, error) {
 			}
 		} else {
 			warnings = append(warnings, `STDIO_USER_ID is invalid (allowed: A-Za-z0-9._@-, length 1-128, not "anonymous"); ignoring it.`)
+		}
+	}
+
+	// COOKIE_VAULT_STDIO_CONSENT (#241): explicit operator opt-in to grant the
+	// session_capture consent to STDIO_USER_ID at startup. STDIO has no consent
+	// endpoint and cannot ask mid-request, so this is the only way to grant it.
+	// Never defaulted on; ignored (with a warning) unless it can take effect.
+	cookieVaultStdioConsent := envBool("COOKIE_VAULT_STDIO_CONSENT", false)
+	if cookieVaultStdioConsent && (!cookieVaultEnabled || stdioUserID == "") {
+		warnings = append(warnings, "COOKIE_VAULT_STDIO_CONSENT is ignored: it needs COOKIE_VAULT_ENABLED=true, STDIO mode (no PORT) and a valid STDIO_USER_ID.")
+		cookieVaultStdioConsent = false
+	}
+
+	// COOKIE_CAPTURE_IN_HTTP (#775): site_login in HTTP mode opens a visible
+	// window on the server host, so it needs the vault, HTTP mode and a display.
+	// Never defaulted on; ignored (with a warning) unless it can take effect.
+	cookieCaptureInHTTP := envBool("COOKIE_CAPTURE_IN_HTTP", false)
+	if cookieCaptureInHTTP {
+		switch {
+		case !cookieVaultEnabled:
+			warnings = append(warnings, "COOKIE_CAPTURE_IN_HTTP is ignored: it needs COOKIE_VAULT_ENABLED=true.")
+			cookieCaptureInHTTP = false
+		case !hasDisplay():
+			warnings = append(warnings, "COOKIE_CAPTURE_IN_HTTP is ignored: this host has no display (set DISPLAY or WAYLAND_DISPLAY). Run site_login from a STDIO session instead.")
+			cookieCaptureInHTTP = false
 		}
 	}
 
@@ -530,12 +613,20 @@ func Load() (*Config, error) {
 			ReferrerPolicy:    envOrDefault("HTTP_REFERRER_POLICY", "no-referrer"),
 			PermissionsPolicy: envOrDefault("HTTP_PERMISSIONS_POLICY", "geolocation=(), camera=(), microphone=()"),
 		},
-		CacheDir:               envOrDefault("CACHE_DIR", defaultCacheDir()),
-		CacheMaxMemoryMB:       envInt("CACHE_MAX_MEMORY_MB", 64),
-		CacheEncryptionKey:     encKey,
-		CacheEncryptionKeyPrev: encKeyPrev,
-		CacheIsolation:         envOrDefault("CACHE_ISOLATION", "shared"),
-		RedisURL:               os.Getenv("REDIS_URL"),
+		CacheDir:                     envOrDefault("CACHE_DIR", defaultCacheDir()),
+		CacheMaxMemoryMB:             envInt("CACHE_MAX_MEMORY_MB", 64),
+		CacheEncryptionKey:           encKey,
+		CacheEncryptionKeyPrev:       encKeyPrev,
+		CookieVaultKey:               cookieVaultKey,
+		CookieVaultTTL:               cookieVaultTTL,
+		MaxConcurrentCaptures:        maxCaptures,
+		CookieCaptureTimeout:         captureTimeout,
+		CookieVaultProfileTTL:        profileTTL,
+		CookieVaultProfileMaxTotalMB: profileMaxTotalMB,
+		CookieCaptureInHTTP:          cookieCaptureInHTTP,
+		CookieVaultStdioConsent:      cookieVaultStdioConsent,
+		CacheIsolation:               envOrDefault("CACHE_ISOLATION", "shared"),
+		RedisURL:                     os.Getenv("REDIS_URL"),
 		RateLimit: RateLimitConfig{
 			PerTenant:      envInt("RATE_LIMIT_PER_TENANT", 120),
 			Global:         envInt("RATE_LIMIT_GLOBAL", 1000),
@@ -548,6 +639,7 @@ func Load() (*Config, error) {
 		AllowPrivateIPs: envBool("ALLOW_PRIVATE_IPS", false),
 		AllowedDomains:  splitCSV(os.Getenv("ALLOWED_DOMAINS")),
 		ChromePath:      os.Getenv("CHROME_PATH"),
+		ChromeNoSandbox: envBool("CHROME_NO_SANDBOX", false),
 		JinaDisabled:    envBool("JINA_READER_DISABLED", false),
 		// BrowserIdleTimeout closes the browser-tier Chromium process after this
 		// long with no scrapeBrowser/ExtractLinks call (#460) — without it, one
@@ -583,6 +675,7 @@ func Load() (*Config, error) {
 			UserAnalytics:         envBool("USER_ANALYTICS_ENABLED", false),
 			Workspaces:            envBool("WORKSPACES_ENABLED", false),
 			Monitoring:            envBool("MONITORING_ENABLED", false),
+			CookieVault:           cookieVaultEnabled,
 			MemoryRetention:       envDuration("MEMORY_RETENTION", 90*24*time.Hour),
 			WorkspaceTTL:          envDuration("WORKSPACE_TTL", 30*24*time.Hour),
 			MonitoringTTL:         envDuration("MONITORING_TTL", 30*24*time.Hour),
@@ -690,6 +783,30 @@ func envBool(key string, fallback bool) bool {
 
 // isHex64 reports whether s is exactly 64 lowercase/uppercase hex characters,
 // matching the AES-256 key encoding used for CACHE_ENCRYPTION_KEY.
+// Cookie vault bundle lifetime: 24h default (session cookies must not outlive a
+// working day), hard-capped at 30 days (#241).
+const (
+	maxCookieVaultTTLDefault = 24 * time.Hour
+	maxCookieVaultTTL        = 30 * 24 * time.Hour
+	// Saved browser profile lifetime: a week, because a profile is signed in
+	// once and reused (issue #775).
+	defaultProfileTTL = 7 * 24 * time.Hour
+	// defaultProfileMaxTotalMB matches cookievault.DefaultProfileMaxTotalBytes.
+	defaultProfileMaxTotalMB = 2048
+)
+
+// hostGOOS is runtime.GOOS; a variable so tests can pose as another OS.
+var hostGOOS = runtime.GOOS
+
+// hasDisplay reports whether a visible browser window can open on this host.
+// macOS and Windows always have one; Linux needs an X11 or Wayland session.
+func hasDisplay() bool {
+	if hostGOOS != "linux" {
+		return true
+	}
+	return os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != ""
+}
+
 func isHex64(s string) bool {
 	if len(s) != 64 {
 		return false

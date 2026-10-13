@@ -1999,6 +1999,7 @@ class ScrapePageMetadata:
 
 @dataclass
 class ScrapePageResponse:
+    authenticated: Optional[bool] = None
     authorityTier: Optional[str] = None
     citation: Optional[Citation] = None
     content: Optional[str] = None
@@ -2013,6 +2014,8 @@ class ScrapePageResponse:
     forumSignals: Optional[ForumSignals] = None
     githubTrustSignals: Optional[GithubTrustSignals] = None
     highlights: list[ScrapePageHighlight] = field(default_factory=list)
+    loginHint: Optional[str] = None
+    loginRequired: Optional[bool] = None
     metadata: Optional[ScrapePageMetadata] = None
     raw: Optional[bool] = None
     retractionStatus: Optional[Any] = None
@@ -2030,6 +2033,7 @@ class ScrapePageResponse:
         if d is None:
             return None
         return cls(
+            authenticated=d.get('authenticated'),
             authorityTier=d.get('authorityTier'),
             citation=Citation.from_dict(d.get('citation')) if d.get('citation') else None,
             content=d.get('content'),
@@ -2044,6 +2048,8 @@ class ScrapePageResponse:
             forumSignals=ForumSignals.from_dict(d.get('forumSignals')) if d.get('forumSignals') else None,
             githubTrustSignals=GithubTrustSignals.from_dict(d.get('githubTrustSignals')) if d.get('githubTrustSignals') else None,
             highlights=[ScrapePageHighlight.from_dict(i) for i in (d.get('highlights') or [])],
+            loginHint=d.get('loginHint'),
+            loginRequired=d.get('loginRequired'),
             metadata=ScrapePageMetadata.from_dict(d.get('metadata')) if d.get('metadata') else None,
             raw=d.get('raw'),
             retractionStatus=d.get('retractionStatus') or None,
@@ -2325,6 +2331,54 @@ class SequentialSearchResult:
             snippet=d.get('snippet'),
             title=d.get('title'),
             url=d.get('url'),
+        )
+
+@dataclass
+class SiteLoginResponse:
+    capturedAt: Optional[str] = None
+    cookieCount: Optional[int] = None
+    domain: Optional[str] = None
+    expiresAt: Optional[str] = None
+    kind: Optional[str] = None
+    reason: Optional[str] = None
+    source: Optional[str] = None
+    status: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "SiteLoginResponse | None":
+        if d is None:
+            return None
+        return cls(
+            capturedAt=d.get('capturedAt'),
+            cookieCount=d.get('cookieCount'),
+            domain=d.get('domain'),
+            expiresAt=d.get('expiresAt'),
+            kind=d.get('kind'),
+            reason=d.get('reason'),
+            source=d.get('source'),
+            status=d.get('status'),
+        )
+
+@dataclass
+class SiteLogoutResponse:
+    domain: Optional[str] = None
+    reason: Optional[str] = None
+    removed: Optional[bool] = None
+    removedCookies: Optional[bool] = None
+    removedProfile: Optional[bool] = None
+    status: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "SiteLogoutResponse | None":
+        if d is None:
+            return None
+        return cls(
+            domain=d.get('domain'),
+            reason=d.get('reason'),
+            removed=d.get('removed'),
+            removedCookies=d.get('removedCookies'),
+            removedProfile=d.get('removedProfile'),
+            status=d.get('status'),
         )
 
 @dataclass

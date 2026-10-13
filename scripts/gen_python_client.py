@@ -382,6 +382,9 @@ class SchemaWalker:
 
 # Per-tool parameter default overrides.  key → (python_type, python_default)
 # Used when the schema default is None but a concrete default improves ergonomics.
+# Optional params kept after the rest in the method signature (see above).
+_PARAM_LAST: dict[str, tuple[str, ...]] = {"scrape_page": ("anonymous",)}
+
 _PARAM_DEFAULTS: dict[str, dict[str, tuple[str, str]]] = {
     "web_search": {
         "num_results": ("int", "5"),
@@ -484,7 +487,11 @@ def _build_method_params(
         added_renames.add(wire_key)
 
     # Optional keyword params (skip renamed wire keys — they're handled above).
-    for wire_key, schema in props.items():
+    # Params in _PARAM_LAST go after the rest, so adding one never shifts the
+    # positional slots existing callers already use.
+    last = _PARAM_LAST.get(tool_name, ())
+    ordered = sorted(props.items(), key=lambda kv: kv[0] in last)
+    for wire_key, schema in ordered:
         if wire_key in required:
             continue
         if wire_key in added_renames:

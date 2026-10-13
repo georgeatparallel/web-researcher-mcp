@@ -24,7 +24,11 @@ func (p *Pipeline) scrapeMarkdown(ctx context.Context, url string, maxLength int
 	req.Header.Set("Accept", "text/markdown, text/plain;q=0.9")
 	req.Header.Set("User-Agent", "web-researcher-mcp/1.0 (content extraction)")
 
-	resp, err := p.client.Do(req)
+	client, err := clientWithCookies(ctx, p.client)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, networkError(url, "markdown", err)
 	}

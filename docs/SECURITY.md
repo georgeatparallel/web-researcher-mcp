@@ -18,6 +18,8 @@ Server-Side Request Forgery is the highest-severity risk for a scraping server.
 
 **Implementation:** Custom `DialContext` on `http.Transport` — see `internal/scraper/ssrf.go`.
 
+**Cloud-proxy tiers:** The Jina and Exa tiers never dial the target themselves, so the dial-time guard cannot see it. Both call `guardCloudProxy` first and skip any non-public host, even when `ALLOW_PRIVATE_IPS=true`. The URL is never sent to the third party.
+
 The approach:
 1. Check hostname against blocklist (cloud metadata endpoints)
 2. Resolve DNS
@@ -352,6 +354,22 @@ Routing decisions, provider health, and recent errors are surfaced to operators 
 - **`GET /dashboard`** (HTTP mode) — an admin-gated, aggregate-only operator dashboard served under a per-request nonce CSP (`internal/server/dashboard.go`); its data endpoint shares the `/admin/*` trust tier. No per-user or per-query data.
 
 None of these is a personal-data store. Field contracts live in `docs/TOOLS.md` (Routing Provenance) and `docs/DEPLOYMENT.md` (Operator Observability).
+
+### Layer 9: Saved logins (opt-in, `COOKIE_VAULT_ENABLED`)
+
+`site_login` keeps a signed-in browser profile or a cookie bundle so `scrape_page` can read pages behind a login (#241, #775). Controls:
+
+- **Consent and identity:** fail-closed on the `session_capture` purpose and an identified user. Never auto-granted. STDIO opts in with `COOKIE_VAULT_STDIO_CONSENT`.
+- **Encryption:** AES-256-GCM files under `COOKIE_VAULT_ENCRYPTION_KEY`, a different key from the cache. File names are hashes of (tenant, user, domain). Each archive is bound to its owner, so a copied file will not open under another subject.
+- **Scope:** cookies and profile navigation stay on the saved site's registrable domain. Redirects to other hosts get nothing. SSRF checks run first.
+- **No leaks:** logs, audit events, metrics and exports carry a kind, a domain and a status. Never a cookie name or value. Erasure through `/admin/data` removes both kinds.
+- **No cache:** signed-in results skip every shared cache and the artifact store.
+- **Plaintext window:** while a profile lease is open, its work folder holds unencrypted cookies in a `0700` folder under `CACHE_DIR`. It is removed on every exit path. Folders left by a crashed process are removed at startup, every 10 minutes while the server runs, and on every logout or erasure (the owner process is gone, or the folder is over 6 hours old).
+- **Browser:** profile browsers keep the browser sandbox and site isolation on, and use the stock launch flags plus `disable-blink-features=AutomationControlled` (hides `navigator.webdriver`). No user-agent, time zone, stealth or incognito override. The server talks to the browser over a private pipe, so no debugging port is opened. On Windows it uses inherited pipe handles; if the installed Chrome is too old for that, it falls back to a loopback debug port and logs a warning. In a container where the sandbox cannot start, set `CHROME_NO_SANDBOX=true` (the official images do).
+- **HTTP:** the server never attaches to a running browser. The login window opens only with `COOKIE_CAPTURE_IN_HTTP=true` and a display, and opens on the server host, so use it for self-hosted single-user setups.
+- **Several processes, one cache dir:** a `site_logout` or erasure leaves a deletion marker next to the files, so a login or scrape that started earlier in another process cannot save the profile again, and cookie reads check the file before using their in-memory copy. Locks and request spacing are per process.
+- **Signed-in content:** it is private and untrusted. The `authenticated` result field tells the model not to follow instructions in it and not to forward it unless the user asks.
+- **Login check:** a login window that closes with no new persistent cookie since it opened (only tracking cookies) is rejected as `not_signed_in` and nothing is stored.
 
 ---
 

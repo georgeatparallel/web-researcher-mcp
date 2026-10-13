@@ -10,6 +10,7 @@ import (
 	"github.com/zoharbabin/web-researcher-mcp/internal/cache"
 	"github.com/zoharbabin/web-researcher-mcp/internal/consent"
 	"github.com/zoharbabin/web-researcher-mcp/internal/content"
+	"github.com/zoharbabin/web-researcher-mcp/internal/cookievault"
 	"github.com/zoharbabin/web-researcher-mcp/internal/memory"
 	"github.com/zoharbabin/web-researcher-mcp/internal/metrics"
 	"github.com/zoharbabin/web-researcher-mcp/internal/persist"
@@ -101,6 +102,16 @@ type Dependencies struct {
 	// Noop (no membership, no data). The workspace_contribute/workspace_read
 	// tools are registered only when a non-Noop store is present.
 	Workspaces workspace.Store
+	// CookieVault holds saved site logins (#241). nil disables the feature:
+	// scrape_page then never injects cookies and site_logout is unregistered.
+	CookieVault cookievault.Store
+	// ProfileStore holds saved browser profiles for login-gated scraping (issue
+	// #775). nil disables the profile path: scrape_page then never launches a
+	// profile browser and site_logout removes cookies only.
+	ProfileStore *cookievault.ProfileStore
+	// CookieCapturer opens the visible login browser for site_login (#241). nil
+	// (HTTP mode, no Chrome) leaves site_login unregistered.
+	CookieCapturer *cookievault.Capturer
 	// Monitor is the consent-gated query-monitoring store (#273). Defaults to nil
 	// (unregistered). monitor_query_save and monitor_query_check register only
 	// when non-nil.
@@ -252,6 +263,14 @@ func RegisterAll(srv *mcp.Server, deps Dependencies) {
 	if _, isNoop := deps.Workspaces.(*workspace.Noop); deps.Workspaces != nil && !isNoop {
 		registerWorkspaceContribute(srv, deps)
 		registerWorkspaceRead(srv, deps)
+	}
+	// site_logout/site_login (#241): logout needs only the vault; login also needs
+	// a capturer (a local visible browser).
+	if deps.CookieVault != nil {
+		registerSiteLogout(srv, deps)
+		if deps.CookieCapturer != nil {
+			registerSiteLogin(srv, deps)
+		}
 	}
 	// monitor_query_save/monitor_query_check (#273) — registered only when a
 	// query-monitor store is present.

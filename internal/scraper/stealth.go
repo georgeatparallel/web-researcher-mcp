@@ -17,7 +17,10 @@ func (p *Pipeline) scrapeStealth(ctx context.Context, url string, maxLength int,
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
-	client := newStealthClient(p.config.AllowPrivateIPs)
+	client, err := clientWithCookies(ctx, newStealthClient(p.config.AllowPrivateIPs))
+	if err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err

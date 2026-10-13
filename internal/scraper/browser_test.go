@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/go-rod/rod/lib/launcher/flags"
+
+	"github.com/zoharbabin/web-researcher-mcp/internal/cookievault"
 )
 
 // skipIfNoChrome skips a test when no real Chromium/Chrome binary is
@@ -366,5 +368,78 @@ func TestScrapeBrowserRecoversFromCrash(t *testing.T) {
 	newBP := getBrowserPool("", 1, 0)
 	if newBP.launcher == nil || newBP.launcher.PID() == pid {
 		t.Errorf("expected a new launcher PID after recovery, still have old PID %d", pid)
+	}
+}
+
+func browserCookieTestPipeline(allowPrivate bool) *Pipeline {
+	return NewPipeline(PipelineConfig{AllowPrivateIPs: allowPrivate, MaxBrowserConcurrency: 1})
+}
+
+// TestBrowserValidatesBeforeSetCookies: a cookie-bearing browser scrape of a
+// blocked host fails before Chromium is given any cookie or makes any request.
+func TestBrowserValidatesBeforeSetCookies(t *testing.T) {
+	skipIfNoChrome(t)
+	resetPool(t)
+	srv := newCookieServer(t, nil)
+	p := browserCookieTestPipeline(false)
+	ctx := WithCookies(context.Background(), []cookievault.Cookie{hostOnly("sid", "SECRET", srv.host())})
+	_, err := p.scrapeBrowser(ctx, srv.URL+"/", 5000, false)
+	if err == nil || !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("err = %v, want a blocked error", err)
+	}
+	if n := len(srv.cookieHeaders()); n != 0 {
+		t.Errorf("server received %d request(s) from a blocked scrape", n)
+	}
+}
+
+// TestBrowserVaultScrapeUsesFreshIncognito: cookies reach the page, and neither a
+// later anonymous scrape nor a later scrape with other cookies sees them.
+func TestBrowserVaultScrapeUsesFreshIncognito(t *testing.T) {
+	skipIfNoChrome(t)
+	resetPool(t)
+	srv := newCookieServer(t, nil)
+	p := browserCookieTestPipeline(true)
+	bg := context.Background()
+
+	withA := WithCookies(bg, []cookievault.Cookie{hostOnly("sid", "ALPHA", srv.host())})
+	resA, err := p.scrapeBrowser(withA, srv.URL+"/a", 5000, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(resA.Content, "sid=ALPHA") {
+		t.Fatalf("page did not receive the cookie: %.200s", resA.Content)
+	}
+
+	resAnon, err := p.scrapeBrowser(bg, srv.URL+"/anon", 5000, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(resAnon.Content, "ALPHA") {
+		t.Errorf("anonymous browser scrape saw the vault cookie: %.200s", resAnon.Content)
+	}
+
+	withB := WithCookies(bg, []cookievault.Cookie{hostOnly("sid", "BETA", srv.host())})
+	resB, err := p.scrapeBrowser(withB, srv.URL+"/b", 5000, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(resB.Content, "sid=BETA") || strings.Contains(resB.Content, "ALPHA") {
+		t.Errorf("second vault scrape wrong: %.200s", resB.Content)
+	}
+}
+
+// TestBrowserBlocksRedirectToBlockedHost: a main-frame redirect to a blocked
+// host is refused before Chromium sends it, so cookies cannot follow it.
+func TestBrowserBlocksRedirectToBlockedHost(t *testing.T) {
+	skipIfNoChrome(t)
+	resetPool(t)
+	srv := newCookieServer(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://metadata.google.internal/computeMetadata/v1/", http.StatusFound)
+	})
+	p := browserCookieTestPipeline(true)
+	ctx := WithCookies(context.Background(), []cookievault.Cookie{hostOnly("sid", "SECRET", srv.host())})
+	_, err := p.scrapeBrowser(ctx, srv.URL+"/", 5000, false)
+	if err == nil || !strings.Contains(err.Error(), "BLOCKED_BY_CLIENT") {
+		t.Fatalf("err = %v, want the redirect refused by the guard", err)
 	}
 }

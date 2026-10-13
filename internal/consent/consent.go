@@ -33,10 +33,13 @@ const (
 	PurposeWorkspace Purpose = "workspace"
 	// PurposeMonitoring covers opt-in saved-query monitoring (#273).
 	PurposeMonitoring Purpose = "monitoring"
+	// PurposeSessionCapture covers storing and replaying a user's login cookies
+	// for login-gated scraping (#241). Never auto-granted, not even in STDIO.
+	PurposeSessionCapture Purpose = "session_capture"
 )
 
 // AllPurposes is the canonical set, used for validation and enumeration.
-var AllPurposes = []Purpose{PurposeMemory, PurposeAnalytics, PurposeWorkspace, PurposeMonitoring}
+var AllPurposes = []Purpose{PurposeMemory, PurposeAnalytics, PurposeWorkspace, PurposeMonitoring, PurposeSessionCapture}
 
 // Audit event types for consent changes (dotted-namespace convention, shared
 // across the codebase). Emitted by the consent admin/tool surface, not by the

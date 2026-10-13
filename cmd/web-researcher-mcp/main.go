@@ -17,6 +17,7 @@ import (
 	"github.com/zoharbabin/web-researcher-mcp/internal/config"
 	"github.com/zoharbabin/web-researcher-mcp/internal/consent"
 	"github.com/zoharbabin/web-researcher-mcp/internal/content"
+	"github.com/zoharbabin/web-researcher-mcp/internal/cookievault"
 	"github.com/zoharbabin/web-researcher-mcp/internal/datasubject"
 	"github.com/zoharbabin/web-researcher-mcp/internal/memory"
 	"github.com/zoharbabin/web-researcher-mcp/internal/metrics"
@@ -208,6 +209,53 @@ func main() {
 	if cfg.Features.Monitoring {
 		monitorStore = persistStore
 		logger.Info("query monitoring enabled", "consent", "required", "ttl", cfg.Features.MonitoringTTL)
+	}
+
+	// Cookie vault (#241): opt-in, consent-gated (session_capture). It has its
+	// own encrypted disk store under its own key, separate from the shared
+	// persistStore, so a leak of CACHE_ENCRYPTION_KEY does not expose logins.
+	// Encryption is mandatory: a store failure disables the feature rather
+	// than falling back to plaintext or memory.
+	var cookieVault cookievault.Store
+	var cookieCapturer *cookievault.Capturer
+	var profileStore *cookievault.ProfileStore
+	if cfg.Features.CookieVault {
+		kv, kerr := persist.NewDiskStore(filepath.Join(cfg.CacheDir, "cookievault"), cfg.CookieVaultKey, "")
+		if kerr != nil {
+			logger.Error("cookie vault disabled: encrypted store unavailable", "err", kerr)
+		} else {
+			cv := cookievault.NewPersistStore(kv, cfg.CookieVaultTTL)
+			cookieVault = cv
+			dataSubjects.Register("cookie_vault", cookievault.AsDataSubject(cv), cookievault.AsDataSubject(cv))
+			// Saved browser profiles (issue #775): same key and consent as the vault,
+			// own encrypted store, own TTL.
+			ps, perr := cookievault.NewProfileStore(filepath.Join(cfg.CacheDir, "profiles"), cfg.CookieVaultKey, cfg.CookieVaultProfileTTL)
+			if perr == nil {
+				ps.WithMaxTotalBytes(int64(cfg.CookieVaultProfileMaxTotalMB) << 20)
+			}
+			if perr != nil {
+				logger.Error("saved browser profiles disabled: encrypted store unavailable", "err", perr)
+			} else {
+				profileStore = ps
+				dataSubjects.Register("cookie_vault_profiles", cookievault.AsProfileDataSubject(ps), cookievault.AsProfileDataSubject(ps))
+			}
+			// The login window needs a display on the machine running the server, so
+			// HTTP mode opens it only when the operator sets COOKIE_CAPTURE_IN_HTTP.
+			// Reading the user's own running browser is STDIO only: over HTTP the
+			// browser would be the server's, not the caller's.
+			if (cfg.Port == 0 || cfg.CookieCaptureInHTTP) && cfg.ChromePath != "disabled" {
+				allowPrivate := cfg.AllowPrivateIPs
+				cookieCapturer = cookievault.NewCapturer(
+					cookievault.NewRodDriver(cfg.ChromePath).WithNoSandbox(cfg.ChromeNoSandbox),
+					func(ctx context.Context, host string) error { return scraper.ValidateHost(ctx, host, allowPrivate) },
+					cfg.MaxConcurrentCaptures, cfg.CookieCaptureTimeout).
+					WithProfiles(profileStore)
+				if cfg.Port == 0 {
+					cookieCapturer.WithAttacher(cookievault.NewRodAttacher(time.Minute))
+				}
+			}
+			logger.Info("cookie vault enabled", "consent", "required", "ttl", cfg.CookieVaultTTL, "capture", cookieCapturer != nil, "profiles", profileStore != nil)
+		}
 	}
 
 	metricsCollector := metrics.NewCollectorWithMaxTenants(cfg.MetricsMaxTenants)
@@ -440,6 +488,7 @@ func main() {
 		AllowPrivateIPs:         cfg.AllowPrivateIPs,
 		AllowedDomains:          cfg.AllowedDomains,
 		ChromePath:              cfg.ChromePath,
+		ChromeNoSandbox:         cfg.ChromeNoSandbox,
 		BrowserIdleTimeout:      cfg.BrowserIdleTimeout, // auto-close idle Chromium process (#460)
 		ExaAPIKey:               cfg.Search.ExaAPIKey,   // enables the paid Exa /contents fallback tier
 		JinaAPIKey:              cfg.Search.JinaAPIKey,  // raises the keyless Jina Reader tier's rate limit
@@ -551,6 +600,9 @@ func main() {
 			GenerativeUI:          cfg.Features.GenerativeUI,
 		},
 		Consent:                consentManager,
+		CookieVault:            cookieVault,
+		CookieCapturer:         cookieCapturer,
+		ProfileStore:           profileStore,
 		UserAnalytics:          userAnalytics,
 		Memory:                 memoryStore,
 		Workspaces:             workspaceStore,
@@ -665,34 +717,7 @@ func main() {
 	//      real user first) is byte-identical and unaffected.
 	if cfg.StdioUserID != "" {
 		if cfg.Features.RegulatedEnabled() {
-			bg := context.Background()
-			grant := func(p consent.Purpose) {
-				// consent.GrantIfAbsent enforces the cardinal rule: grant only
-				// when no record exists, so a prior withdrawal is never resurrected.
-				wrote, err := consent.GrantIfAbsent(bg, consentManager, "default", cfg.StdioUserID, p,
-					"stdio_bootstrap", time.Now().UTC().Format(time.RFC3339))
-				if err != nil {
-					logger.Warn("stdio consent auto-grant failed", "user", cfg.StdioUserID, "purpose", string(p), "err", err)
-					return
-				}
-				if !wrote {
-					return
-				}
-				ev := audit.NewEvent(consent.EventGrant, "default", cfg.StdioUserID)
-				ev.Metadata = map[string]any{"purpose": string(p), "granted": true, "source": "stdio_bootstrap"}
-				auditor.Log(ev)
-				logger.Info("stdio consent auto-granted", "user", cfg.StdioUserID, "purpose", string(p))
-			}
-			if cfg.Features.Memory {
-				grant(consent.PurposeMemory)
-			}
-			if cfg.Features.UserAnalytics {
-				grant(consent.PurposeAnalytics)
-			}
-			if cfg.Features.Monitoring {
-				grant(consent.PurposeMonitoring)
-			}
-			// PurposeWorkspace is intentionally never auto-granted.
+			grantStdioConsent(context.Background(), cfg, consentManager, auditor, logger)
 		}
 
 		uid := cfg.StdioUserID
@@ -924,4 +949,40 @@ func completionProviderNames(deps tools.Dependencies) []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// grantStdioConsent pre-grants consent, only when no record exists, for the
+// per-user features the STDIO operator enabled. consent.GrantIfAbsent never
+// resurrects a withdrawn consent. Workspace and session_capture are never
+// granted here: workspace is host-owned. session_capture stores the user's
+// website logins, so it is granted only when the operator sets
+// COOKIE_VAULT_STDIO_CONSENT=true, an explicit opt-in (#241).
+func grantStdioConsent(ctx context.Context, cfg *config.Config, mgr consent.Manager, aud audit.Auditor, logger *slog.Logger) {
+	grant := func(p consent.Purpose, source string) {
+		wrote, err := consent.GrantIfAbsent(ctx, mgr, "default", cfg.StdioUserID, p,
+			source, time.Now().UTC().Format(time.RFC3339))
+		if err != nil {
+			logger.Warn("stdio consent auto-grant failed", "user", cfg.StdioUserID, "purpose", string(p), "err", err)
+			return
+		}
+		if !wrote {
+			return
+		}
+		ev := audit.NewEvent(consent.EventGrant, "default", cfg.StdioUserID)
+		ev.Metadata = map[string]any{"purpose": string(p), "granted": true, "source": source}
+		aud.Log(ev)
+		logger.Info("stdio consent auto-granted", "user", cfg.StdioUserID, "purpose", string(p))
+	}
+	if cfg.Features.Memory {
+		grant(consent.PurposeMemory, "stdio_bootstrap")
+	}
+	if cfg.Features.UserAnalytics {
+		grant(consent.PurposeAnalytics, "stdio_bootstrap")
+	}
+	if cfg.Features.Monitoring {
+		grant(consent.PurposeMonitoring, "stdio_bootstrap")
+	}
+	if cfg.Features.CookieVault && cfg.CookieVaultStdioConsent {
+		grant(consent.PurposeSessionCapture, "stdio_env_optin")
+	}
 }

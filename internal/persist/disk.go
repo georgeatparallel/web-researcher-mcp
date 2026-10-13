@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,10 @@ type DiskStore struct {
 type diskIndexEntry struct {
 	value     []byte
 	expiresAt time.Time // zero means no expiry
+	// onDisk is true when the entry's file is known to exist, so a missing
+	// file means another process deleted it. A failed write leaves the entry
+	// memory-only and it keeps being served.
+	onDisk bool
 }
 
 // NewDiskStore creates (or opens) an encrypted disk store rooted at dir. An
@@ -83,6 +88,14 @@ func (s *DiskStore) Get(_ context.Context, key string) ([]byte, bool) {
 			s.Delete(context.Background(), key)
 			return nil, false
 		}
+		// Another process sharing the directory may have deleted the entry
+		// (logout, consent withdrawal). The file is the source of truth.
+		if _, err := os.Stat(s.filePath(key)); e.onDisk && errors.Is(err, os.ErrNotExist) {
+			s.mu.Lock()
+			delete(s.index, key)
+			s.mu.Unlock()
+			return nil, false
+		}
 		out := make([]byte, len(e.value))
 		copy(out, e.value)
 		return out, true
@@ -114,31 +127,31 @@ func (s *DiskStore) getFromFile(key string, now time.Time) ([]byte, bool) {
 
 	payload := data[8:]
 	if s.gcm == nil {
-		s.hydrate(key, payload, expiresAt)
+		s.hydrate(key, payload, expiresAt, true)
 		return payload, true
 	}
 
 	aad := s.aad(key)
 	if decrypted, derr := cache.GCMDecrypt(s.gcm, payload, aad); derr == nil {
-		s.hydrate(key, decrypted, expiresAt)
+		s.hydrate(key, decrypted, expiresAt, true)
 		return decrypted, true
 	}
 	if s.gcmPrev != nil {
 		if decrypted, derr := cache.GCMDecrypt(s.gcmPrev, payload, aad); derr == nil {
 			// Lazy re-encrypt with the current key on first read after rotation.
-			s.writeFile(key, decrypted, expiresAt)
-			s.hydrate(key, decrypted, expiresAt)
+			ok := s.writeFile(key, decrypted, expiresAt)
+			s.hydrate(key, decrypted, expiresAt, ok)
 			return decrypted, true
 		}
 	}
 	return nil, false
 }
 
-func (s *DiskStore) hydrate(key string, value []byte, expiresAt time.Time) {
+func (s *DiskStore) hydrate(key string, value []byte, expiresAt time.Time, onDisk bool) {
 	stored := make([]byte, len(value))
 	copy(stored, value)
 	s.mu.Lock()
-	s.index[key] = diskIndexEntry{value: stored, expiresAt: expiresAt}
+	s.index[key] = diskIndexEntry{value: stored, expiresAt: expiresAt, onDisk: onDisk}
 	s.mu.Unlock()
 }
 
@@ -147,12 +160,11 @@ func (s *DiskStore) Set(_ context.Context, key string, value []byte, ttl time.Du
 	if ttl > 0 {
 		expiresAt = time.Now().Add(ttl)
 	}
-	s.hydrate(key, value, expiresAt)
-	s.writeFile(key, value, expiresAt)
+	s.hydrate(key, value, expiresAt, s.writeFile(key, value, expiresAt))
 }
 
 // writeFile atomically persists value to disk with an 8-byte expiry prefix.
-func (s *DiskStore) writeFile(key string, value []byte, expiresAt time.Time) {
+func (s *DiskStore) writeFile(key string, value []byte, expiresAt time.Time) bool {
 	data := value
 	if s.gcm != nil {
 		data = cache.GCMEncrypt(s.gcm, data, s.aad(key))
@@ -163,29 +175,29 @@ func (s *DiskStore) writeFile(key string, value []byte, expiresAt time.Time) {
 	// still serves it for this process's lifetime).
 	buf, err := cache.PrependExpiryHeader(data, expiresAt)
 	if err != nil {
-		return
+		return false
 	}
 
 	tmp, err := os.CreateTemp(s.dir, ".persist-*.tmp")
 	if err != nil {
-		return
+		return false
 	}
 	tmpName := tmp.Name()
 	if _, err := tmp.Write(buf); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
-		return
+		return false
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
-		return
+		return false
 	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpName)
-		return
+		return false
 	}
-	_ = os.Rename(tmpName, s.filePath(key))
+	return os.Rename(tmpName, s.filePath(key)) == nil
 }
 
 func (s *DiskStore) Delete(_ context.Context, key string) {

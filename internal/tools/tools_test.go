@@ -26,6 +26,7 @@ import (
 	"github.com/zoharbabin/web-researcher-mcp/internal/config"
 	"github.com/zoharbabin/web-researcher-mcp/internal/consent"
 	"github.com/zoharbabin/web-researcher-mcp/internal/content"
+	"github.com/zoharbabin/web-researcher-mcp/internal/cookievault"
 	"github.com/zoharbabin/web-researcher-mcp/internal/memory"
 	"github.com/zoharbabin/web-researcher-mcp/internal/metrics"
 	"github.com/zoharbabin/web-researcher-mcp/internal/persist"
@@ -48,7 +49,9 @@ func TestMain(m *testing.M) {
 		_, _ = w.Write([]byte(`{"code":200,"status":20000,"data":{"content":""}}`))
 	}))
 	scraper.JinaReaderURL = stub.URL + "/"
+	stopDNS := installFakeDNS()
 	code := m.Run()
+	stopDNS()
 	stub.Close()
 	os.Exit(code)
 }
@@ -392,6 +395,8 @@ func setupTestDeps() Dependencies {
 		Memory:          memory.NewStore(persist.NewMemoryStore(), 0),
 		Workspaces:      workspace.NewStore(persist.NewMemoryStore(), 0),
 		Monitor:         persist.NewMemoryStore(),
+		CookieVault:     cookievault.NewPersistStore(persist.NewMemoryStore(), time.Hour),
+		CookieCapturer:  cookievault.NewCapturer(&fakeLoginDriver{}, nil, 1, time.Minute),
 		CTLogResolver:   &mockCTLogResolver{},
 		ArchiveResolver: &mockArchiveResolver{},
 		ResearchPanelProviders: []ModelProvider{

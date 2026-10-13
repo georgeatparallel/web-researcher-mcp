@@ -54,7 +54,11 @@ func (p *Pipeline) scrapeHTML(ctx context.Context, url string, maxLength int, ra
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; web-researcher-mcp/1.0)")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
 
-	resp, err := p.client.Do(req)
+	client, err := clientWithCookies(ctx, p.client)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, networkError(url, "html", err)
 	}

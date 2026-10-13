@@ -185,6 +185,7 @@ All configurable. Returns 429 with `Retry-After` header.
 ### Encryption
 
 - **At rest:** AES-256-GCM with random nonces for cache and sessions (when `CACHE_ENCRYPTION_KEY` is set). File permissions 0600.
+- **Saved logins:** cookie bundles and browser profiles use their own key, `COOKIE_VAULT_ENCRYPTION_KEY`, which must differ from the cache key. A profile is a chunked AES-256-GCM archive (tampering or truncation fails the read). It is unpacked into a private temporary directory only while the headless browser runs, then removed on every exit path. Archive extraction rejects path traversal, links and device files, and large caches are left out. Each profile has a size cap and each subject at most 10 profiles. In HTTP mode `site_login` opens a window on the server host only when `COOKIE_CAPTURE_IN_HTTP=true`, and the server never attaches to a browser debug port.
 - **In transit:** TLS 1.2+ for all outbound connections (Go stdlib default). HSTS header for inbound HTTP.
 - **FIPS option:** Build with `GOFIPS140=latest` for Go's native FIPS 140-3 cryptographic module (`crypto/fips140`), backed by active CMVP certificate [#5247](https://csrc.nist.gov/projects/cryptographic-module-validation-program/certificate/5247). `GOEXPERIMENT=boringcrypto` is not the compliant path — BoringCrypto's own certificate is [Historical](https://csrc.nist.gov/projects/cryptographic-module-validation-program/certificate/3678), and Go's docs mark that build flag unsupported and slated for removal.
 
@@ -228,6 +229,7 @@ We deliberately minimize what we store:
 | Research sessions | Per-tenant:session compound key | Session TTL (default 4h) | Query context |
 | Audit logs | Structured JSON | Configurable (default 180 days) | User/tenant IDs only |
 | Rate limit counters | Per-tenant in memory | Resets daily | Tenant ID only |
+| Saved logins (opt-in `site_login`, consent purpose `session_capture`) | Cookie bundles and browser profiles, AES-256-GCM files under a separate key (`COOKIE_VAULT_ENCRYPTION_KEY`), file names are hashes of (tenant, user, domain) | Cookie bundle `COOKIE_VAULT_TTL` (default 24h); profile `COOKIE_VAULT_PROFILE_TTL` (default 7d), not extended by use; all profiles on a node are capped by `COOKIE_VAULT_PROFILE_MAX_TOTAL_MB` (default 2048) | Yes: session credentials. Never logged; audit and metrics carry only a kind, a domain and a status. Export returns counts and summaries, never values. Erasure deletes both |
 | Recent-errors ring (`diagnostics://errors/recent`) | Bounded in-memory ring, tenant-aware | None (memory-only, oldest overwritten) | No — causes redacted via `audit.MaskSecrets`; no query text, no full URLs |
 | Operator dashboard / `diagnostics://health` | Derived on read from existing metrics + breaker state | None (computed per request) | No — aggregate-only, no per-user/per-query data |
 

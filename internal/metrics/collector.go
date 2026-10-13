@@ -26,6 +26,7 @@ type Collector struct {
 	cacheHits   *prometheus.CounterVec
 	cacheMisses *prometheus.CounterVec
 	activeConns prometheus.Gauge
+	siteSession *prometheus.CounterVec
 
 	mu          sync.RWMutex
 	toolStats   map[string]*ToolMetrics
@@ -114,6 +115,10 @@ func NewCollectorWithMaxTenants(maxTenants int) *Collector {
 			Name: "mcp_active_connections",
 			Help: "Active MCP connections",
 		}),
+		siteSession: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "mcp_site_session_events_total",
+			Help: "Saved-login events by event (login, logout, scrape), kind (cookies, profile) and status",
+		}, []string{"event", "kind", "status"}),
 		toolStats:    make(map[string]*ToolMetrics),
 		tenantStats:  make(map[string]*TenantMetrics),
 		maxTenants:   maxTenants,
@@ -121,7 +126,7 @@ func NewCollectorWithMaxTenants(maxTenants int) *Collector {
 		recentErrors: NewErrorRing(),
 	}
 
-	registry.MustRegister(c.toolCalls, c.toolErrors, c.toolLatency, c.cacheHits, c.cacheMisses, c.activeConns)
+	registry.MustRegister(c.toolCalls, c.toolErrors, c.toolLatency, c.cacheHits, c.cacheMisses, c.activeConns, c.siteSession)
 	return c
 }
 
@@ -154,6 +159,12 @@ func (c *Collector) RecordToolCall(tool string, latency time.Duration, err error
 		stats.latencies = stats.latencies[len(stats.latencies)-1000:]
 	}
 	stats.latencyMu.Unlock()
+}
+
+// RecordSiteSession counts one saved-login event. Labels are fixed vocabularies
+// (no domain, user or tenant), so cardinality stays bounded (issue #775).
+func (c *Collector) RecordSiteSession(event, kind, status string) {
+	c.siteSession.WithLabelValues(event, kind, status).Inc()
 }
 
 func (c *Collector) RecordCacheHit(layer string) {

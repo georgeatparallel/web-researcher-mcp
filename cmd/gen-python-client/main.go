@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/zoharbabin/web-researcher-mcp/internal/cache"
 	"github.com/zoharbabin/web-researcher-mcp/internal/consent"
 	"github.com/zoharbabin/web-researcher-mcp/internal/content"
+	"github.com/zoharbabin/web-researcher-mcp/internal/cookievault"
 	"github.com/zoharbabin/web-researcher-mcp/internal/memory"
 	"github.com/zoharbabin/web-researcher-mcp/internal/metrics"
 	"github.com/zoharbabin/web-researcher-mcp/internal/persist"
@@ -114,6 +116,10 @@ func buildDeps() tools.Dependencies {
 		Memory:               memory.NewStore(persist.NewMemoryStore(), 0),
 		Workspaces:           workspace.NewStore(persist.NewMemoryStore(), 0),
 		Monitor:              persist.NewMemoryStore(),
+		// site_login/site_logout register only with a vault and a capturer; the
+		// schemas are all that matters here, so nothing is ever launched.
+		CookieVault:    cookievault.NewPersistStore(persist.NewMemoryStore(), 0),
+		CookieCapturer: cookievault.NewCapturer(cookievault.NewRodDriver(""), func(context.Context, string) error { return nil }, 1, time.Minute),
 		// research_panel registers only when at least one panel member is
 		// present — a placeholder mock is enough for schema generation.
 		ResearchPanelProviders: []tools.ModelProvider{&mockModelProvider{}},

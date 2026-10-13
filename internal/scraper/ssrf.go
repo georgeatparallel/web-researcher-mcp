@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -182,4 +183,57 @@ func mustParseCIDR(s string) *net.IPNet {
 		panic(err)
 	}
 	return network
+}
+
+// ValidateHost applies the dial-time SSRF rules ahead of time: it fails when
+// host is a blocked metadata name, resolves to nothing, or (unless allowPrivate)
+// resolves to any private address. Callers use it before handing a host to
+// something that dials on its own, such as a browser (see issue #241).
+func ValidateHost(ctx context.Context, host string, allowPrivate bool) error {
+	host = strings.Trim(host, "[]")
+	if isBlockedHostname(host) {
+		return ErrSSRFBlocked
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return err
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("no IP addresses found for %s", host)
+	}
+	for _, ip := range ips {
+		if !allowPrivate && isPrivateIP(ip.IP) {
+			return ErrSSRFBlocked
+		}
+	}
+	return nil
+}
+
+// guardCloudProxy is a package var so the package's own tests, which point the
+// pipeline at loopback httptest servers, can stub it (see TestMain in
+// jina_test.go) the same way they redirect JinaReaderURL. Production always
+// runs checkCloudProxyTarget.
+var guardCloudProxy = checkCloudProxyTarget
+
+// checkCloudProxyTarget refuses to hand pageURL to a cloud extraction proxy (Jina,
+// Exa) unless its host resolves only to public addresses. Those tiers never dial
+// the target themselves, so the SSRF-safe client cannot protect them; without
+// this check a private or internal URL would be sent to a third party. It
+// ignores ALLOW_PRIVATE_IPS: that setting permits local fetches, not disclosing
+// internal URLs to an external service.
+func checkCloudProxyTarget(ctx context.Context, pageURL string) error {
+	u, err := url.Parse(pageURL)
+	if err != nil || u.Hostname() == "" {
+		return contentError(pageURL, "not sent to a cloud proxy: invalid URL")
+	}
+	if err := ValidateHost(ctx, u.Hostname(), false); err != nil {
+		if errors.Is(err, ErrSSRFBlocked) {
+			// A skip, not a denial: the direct tiers report the SSRF refusal at
+			// dial time, and a private target that fails otherwise (403, 429, ...)
+			// must keep its own error kind.
+			return contentError(pageURL, "not sent to a cloud proxy: target is not a public host")
+		}
+		return networkError(pageURL, "", err)
+	}
+	return nil
 }
