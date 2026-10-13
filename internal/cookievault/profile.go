@@ -131,7 +131,7 @@ func (s *ProfileStore) sweep() {
 	if entries, err := os.ReadDir(s.workDir); err == nil {
 		for _, e := range entries {
 			if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) > staleWorkDirAge {
-				_ = os.RemoveAll(filepath.Join(s.workDir, e.Name()))
+				removeDir(filepath.Join(s.workDir, e.Name()))
 			}
 		}
 	}
@@ -352,7 +352,7 @@ func (s *ProfileStore) begin(ctx context.Context, key, domain string) (*ProfileL
 	if err != nil || meta.Domain != domain || !meta.ExpiresAt.After(s.clock()) {
 		// Unreadable, mismatched or expired: start over with an empty profile.
 		slog.Warn("saved browser profile unreadable; starting fresh", "domain", domain)
-		_ = os.RemoveAll(dir)
+		removeDir(dir)
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			l.Discard()
 			return nil, err
@@ -400,8 +400,23 @@ func (l *ProfileLease) Commit(ctx context.Context) (ProfileSummary, error) {
 // Discard removes Dir and ends the lease without saving. Idempotent.
 func (l *ProfileLease) Discard() { l.once.Do(l.end) }
 
+// removeDir deletes a work dir, retrying briefly: Chrome helper processes can
+// still write for a moment after the debug port closes, which fails the first
+// RemoveAll with "directory not empty". The dir holds plaintext cookies, so a
+// final failure is logged (without the path) and the stale-dir sweep retries.
+func removeDir(dir string) {
+	var err error
+	for i := 0; i < 20; i++ {
+		if err = os.RemoveAll(dir); err == nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	slog.Warn("could not remove browser work dir; the next sweep will retry", "error", err)
+}
+
 func (l *ProfileLease) end() {
-	_ = os.RemoveAll(l.Dir)
+	removeDir(l.Dir)
 	l.store.unlock(l.ks)
 }
 

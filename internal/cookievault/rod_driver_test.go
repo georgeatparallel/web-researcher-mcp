@@ -25,7 +25,13 @@ func TestRodDriverReadsCookiesAndSignalsClose(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	dir := t.TempDir()
+	// Not t.TempDir: Chrome helpers may still write after Close, which would
+	// fail TempDir's single-shot cleanup. removeDir retries.
+	dir, err := os.MkdirTemp("", "rod-driver-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { removeDir(dir) })
 	d := &RodDriver{chromePath: path, headless: true}
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
