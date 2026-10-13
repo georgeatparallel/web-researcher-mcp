@@ -17,6 +17,10 @@ var (
 	ErrNothingCaptured = errors.New("cookievault: no cookies were set for this domain")
 	// ErrNotSignedIn: the user's browser was reached but holds no cookies for the site.
 	ErrNotSignedIn = errors.New("cookievault: the browser holds no cookies for this site")
+	// ErrNoSignInSeen: the window closed with no new persistent cookie since it
+	// opened, so the user did not sign in (only the site's tracking cookies are
+	// there). Nothing is stored.
+	ErrNoSignInSeen = errors.New("cookievault: no sign-in was seen in the login window")
 	// ErrProfileNotSaved: the browser did not write the sign-in to disk, so a
 	// later headless scrape would not be signed in. Nothing is stored.
 	ErrProfileNotSaved = errors.New("cookievault: the browser did not save the sign-in")
@@ -28,6 +32,11 @@ var (
 )
 
 const capturePollInterval = 500 * time.Millisecond
+
+// signInBaselineWait is how long after the window opens its cookies count as
+// "before sign-in". A person cannot sign in faster; whatever the site sets in
+// this time (page-load and tracking cookies) is not proof of a login.
+const signInBaselineWait = 3 * time.Second
 
 // Source says where captured cookies came from.
 type Source string
@@ -75,8 +84,17 @@ type Capturer struct {
 	slots    chan struct{}
 	timeout  time.Duration
 	poll     time.Duration
+	baseline time.Duration
 	attacher Attacher
 	profiles *ProfileStore
+}
+
+// WithSignInBaseline sets how long after a login window opens its cookies count
+// as "before sign-in" (default 3 s). Zero turns the new-cookie check into
+// "any persistent cookie", for tests whose fake window signs in at once.
+func (c *Capturer) WithSignInBaseline(d time.Duration) *Capturer {
+	c.baseline = d
+	return c
 }
 
 // WithProfiles sets where LoginWindow saves the browser profile. Without it
@@ -109,6 +127,7 @@ func NewCapturer(driver Driver, validate HostValidator, maxConcurrent int, timeo
 		slots:    make(chan struct{}, maxConcurrent),
 		timeout:  timeout,
 		poll:     capturePollInterval,
+		baseline: signInBaselineWait,
 	}
 }
 
@@ -207,9 +226,18 @@ func (c *Capturer) LoginWindow(ctx context.Context, sub Subject, loginURL string
 	defer closeSession()
 
 	var last []Cookie
+	opened := time.Now()
+	before := map[cookieID]bool{} // persistent cookies seen before anyone could sign in
 	snapshot := func() {
-		if cookies, err := sess.Cookies(windowCtx); err == nil {
-			last = cookies
+		cookies, err := sess.Cookies(windowCtx)
+		if err != nil {
+			return
+		}
+		last = cookies
+		if time.Since(opened) <= c.baseline {
+			for _, ck := range persistentCookies(FilterToDomain(cookies, domain, time.Now())) {
+				before[ck.id()] = true
+			}
 		}
 	}
 	ticker := time.NewTicker(c.poll)
@@ -241,6 +269,12 @@ wait:
 	if len(persistent) == 0 {
 		// A session-only sign-in is never written to the profile on disk.
 		return ProfileSummary{}, ErrProfileNotSaved
+	}
+
+	// A first login must have added a persistent cookie after the page loaded.
+	// Re-signing in over a saved profile may only refresh existing ones.
+	if lease.Fresh && !hasNewCookie(persistent, before) {
+		return ProfileSummary{}, ErrNoSignInSeen
 	}
 
 	// The window is gone. Finish within a bounded time even if the caller's
@@ -278,15 +312,29 @@ func persistentCookies(cookies []Cookie) []Cookie {
 // containsAll reports whether every cookie in want (by name, domain and path)
 // is present in have.
 func containsAll(have, want []Cookie) bool {
-	type id struct{ name, domain, path string }
-	got := make(map[id]bool, len(have))
+	got := make(map[cookieID]bool, len(have))
 	for _, c := range have {
-		got[id{c.Name, c.Domain, c.Path}] = true
+		got[c.id()] = true
 	}
 	for _, c := range want {
-		if !got[id{c.Name, c.Domain, c.Path}] {
+		if !got[c.id()] {
 			return false
 		}
 	}
 	return true
+}
+
+// cookieID is a cookie's identity (name, domain, path), without its value.
+type cookieID struct{ name, domain, path string }
+
+func (c Cookie) id() cookieID { return cookieID{c.Name, c.Domain, c.Path} }
+
+// hasNewCookie reports whether any cookie in cookies is not in before.
+func hasNewCookie(cookies []Cookie, before map[cookieID]bool) bool {
+	for _, c := range cookies {
+		if !before[c.id()] {
+			return true
+		}
+	}
+	return false
 }

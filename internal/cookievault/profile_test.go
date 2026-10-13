@@ -9,6 +9,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -601,5 +603,88 @@ func TestProfileAcquireRemovesUnreadableArchive(t *testing.T) {
 	}
 	if _, err := os.Stat(s.path(key)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unreadable archive still on disk: %v", err)
+	}
+}
+
+// A second store on the same directory stands in for a second server process.
+func TestProfileDeleteInOtherProcessBlocksCommit(t *testing.T) {
+	t.Parallel()
+	a := newTestProfileStore(t)
+	saveProfile(t, a, subjA, "linkedin.com", "x")
+	b, err := NewProfileStore(a.dir, profileTestKey, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := a.Acquire(context.Background(), subjA, "linkedin.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := b.Delete(context.Background(), subjA, "linkedin.com"); err != nil || !ok {
+		t.Fatalf("Delete = %v, %v", ok, err)
+	}
+	if _, err := l.Commit(context.Background()); !errors.Is(err, ErrNoProfile) {
+		t.Fatalf("commit after other process deleted: %v", err)
+	}
+	if _, err := a.Acquire(context.Background(), subjA, "linkedin.com"); !errors.Is(err, ErrNoProfile) {
+		t.Fatalf("profile came back: %v", err)
+	}
+	// A login that starts after the deletion saves normally.
+	saveProfile(t, a, subjA, "linkedin.com", "again")
+}
+
+func TestProfileEraseInOtherProcessBlocksFirstLogin(t *testing.T) {
+	t.Parallel()
+	a := newTestProfileStore(t)
+	b, _ := NewProfileStore(a.dir, profileTestKey, time.Hour)
+	l, err := a.Begin(context.Background(), subjA, "linkedin.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.EraseAll(context.Background(), subjA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Commit(context.Background()); !errors.Is(err, ErrNoProfile) {
+		t.Fatalf("login committed after erasure in another process: %v", err)
+	}
+	// Another subject is unaffected.
+	saveProfile(t, a, subjB, "linkedin.com", "b")
+}
+
+func TestProfileCommitRechecksCap(t *testing.T) {
+	t.Parallel()
+	s := newTestProfileStore(t)
+	l, err := s.Begin(context.Background(), subjA, "late.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range MaxProfilesPerSubject {
+		saveProfile(t, s, subjA, "site"+string(rune('a'+i))+".com", "x")
+	}
+	if _, err := l.Commit(context.Background()); !errors.Is(err, ErrTooManyProfiles) {
+		t.Fatalf("got %v, want ErrTooManyProfiles", err)
+	}
+}
+
+func TestProfileSweepRemovesDeadOwnerWorkDirs(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("owner liveness is not checked on Windows")
+	}
+	s := newTestProfileStore(t)
+	dead := filepath.Join(s.workDir, "p-2147483646-abc") // no such process
+	mine := filepath.Join(s.workDir, "p-"+strconv.Itoa(os.Getpid())+"-abc")
+	for _, d := range []string{dead, mine} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.EraseAll(context.Background(), subjA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dead); !os.IsNotExist(err) {
+		t.Fatal("work dir of a dead process survived erasure")
+	}
+	if _, err := os.Stat(mine); err != nil {
+		t.Fatal("work dir of a live process was removed")
 	}
 }

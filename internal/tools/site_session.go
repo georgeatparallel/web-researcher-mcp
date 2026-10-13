@@ -69,11 +69,11 @@ func profileLeaseFor(ctx context.Context, deps Dependencies, rawURL string) (*co
 		return nil, nil
 	}
 	lease, err := deps.ProfileStore.Acquire(ctx, sub, host)
-	if errors.Is(err, cookievault.ErrProfileBusy) {
-		return nil, err
+	if errors.Is(err, cookievault.ErrNoProfile) {
+		return nil, nil // none, expired or unreadable: scrape anonymously
 	}
 	if err != nil {
-		return nil, nil // none, expired or unreadable: scrape anonymously
+		return nil, err // busy, cancelled or a disk failure: do not hide it behind an anonymous page
 	}
 	return lease, nil
 }
@@ -211,12 +211,14 @@ func siteLoginFailure(ctx context.Context, deps Dependencies, start time.Time, k
 		status, msg = "browser_unavailable", "could not reach your browser. In Chrome, Edge or Brave open chrome://inspect/#remote-debugging, turn it on, keep the browser running, call site_login again and click Allow. If you use another browser or cannot enable it, call site_login again with use_login_window=true"
 	case errors.Is(err, cookievault.ErrNotSignedIn):
 		status, msg = "not_signed_in", "your browser has no cookies for that site. Sign in to the site in that browser, then call site_login again. To sign in in a separate window instead, call site_login with use_login_window=true"
+	case errors.Is(err, cookievault.ErrNoSignInSeen):
+		status, msg = "not_signed_in", "no sign-in was seen in the window (only the site's own tracking cookies); nothing was saved. Call site_login again and sign in before you close the window"
 	case errors.Is(err, cookievault.ErrNothingCaptured):
 		status, msg = "nothing_captured", "no cookies were captured for that site; nothing was saved. Sign in before you close the window"
 	case errors.Is(err, cookievault.ErrProfileNotSaved):
 		status, msg = "profile_not_saved", "the site did not keep your sign-in, so a later scrape would not be signed in; nothing was saved. Sign in again and tick 'remember me' or 'stay signed in' if the site offers it"
 	case errors.Is(err, cookievault.ErrBrowserLaunch):
-		status, msg = "browser_launch_failed", "could not start a browser. Install Chrome, Edge or Brave, or set CHROME_PATH"
+		status, msg = "browser_launch_failed", "could not start a browser. Install Chrome, Edge or Brave, or set CHROME_PATH. In a container the browser sandbox may need CHROME_NO_SANDBOX=true"
 	case errors.Is(err, cookievault.ErrTooManyProfiles):
 		status, msg = "too_many_profiles", "too many sites have a saved sign-in; call site_logout for one you no longer need"
 	case errors.Is(err, cookievault.ErrProfileTooLarge):

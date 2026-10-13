@@ -329,7 +329,7 @@ func newVaultEnv(t *testing.T) *vaultEnv {
 		Consent:        e.consent,
 		CookieVault:    cookievault.NewPersistStore(persist.NewMemoryStore(), time.Hour),
 		ProfileStore:   profiles,
-		CookieCapturer: cookievault.NewCapturer(e.driver, nil, 1, time.Minute).WithProfiles(profiles),
+		CookieCapturer: cookievault.NewCapturer(e.driver, nil, 1, time.Minute).WithProfiles(profiles).WithSignInBaseline(0),
 	}
 	return e
 }

@@ -96,11 +96,14 @@ func registerScrapePage(srv *mcp.Server, deps Dependencies) {
 		if !input.Anonymous {
 			var lerr error
 			if lease, lerr = profileLeaseFor(ctx, deps, input.URL); lerr != nil {
-				recordToolCall(deps, "scrape_page", time.Since(start), lerr, "profile_busy", false)
-				auditToolCallQuery(ctx, deps, "scrape_page", time.Since(start), lerr, "profile_busy", "", scrapeAuditExtra("profile", input.URL))
-				recordSiteSession(deps, "scrape", "profile", "busy")
-				return structuredError("The saved sign-in for this site is in use by another scrape or login. Retry in a minute.",
-					ToolError{Kind: ErrKindUpstream, Retryable: true, SuggestedAction: ActionRetryAfterDelay}), nil, nil
+				status, msg := "error", "The saved sign-in for this site could not be opened. Retry, or set anonymous=true to scrape without it."
+				if errors.Is(lerr, cookievault.ErrProfileBusy) {
+					status, msg = "busy", "The saved sign-in for this site is in use by another scrape or login. Retry in a minute."
+				}
+				recordToolCall(deps, "scrape_page", time.Since(start), lerr, "profile_"+status, false)
+				auditToolCallQuery(ctx, deps, "scrape_page", time.Since(start), lerr, "profile_"+status, "", scrapeAuditExtra("profile", input.URL))
+				recordSiteSession(deps, "scrape", "profile", status)
+				return structuredError(msg, ToolError{Kind: ErrKindUpstream, Retryable: true, SuggestedAction: ActionRetryAfterDelay}), nil, nil
 			}
 			if lease == nil {
 				cookies = vaultCookiesFor(ctx, deps, input.URL)

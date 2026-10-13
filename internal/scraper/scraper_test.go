@@ -2578,6 +2578,8 @@ func TestHostnameMatches(t *testing.T) {
 		{"trailing dot host", "https://example.com./page", "example.com", true},
 		{"case-insensitive", "https://EXAMPLE.com/page", "Example.COM", true},
 		{"empty domain", "https://example.com/", "", false},
+		{"unicode host vs punycode domain", "https://münchen.de/x", "xn--mnchen-3ya.de", true},
+		{"unicode subdomain", "https://www.münchen.de/x", "xn--mnchen-3ya.de", true},
 		{"unparseable url", "://bad", "example.com", false},
 	}
 	for _, tt := range tests {

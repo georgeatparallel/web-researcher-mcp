@@ -360,3 +360,19 @@ func TestNewDiskStoreUnwritableDir(t *testing.T) {
 		t.Fatal("expected NewDiskStore to fail when dir path is under a file")
 	}
 }
+
+func TestDiskStoreSeesDeleteFromAnotherProcess(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	a, _ := NewDiskStore(dir, "", "")
+	b, _ := NewDiskStore(dir, "", "") // stands in for a second process
+	ctx := context.Background()
+	a.Set(ctx, "k", []byte("v"), time.Hour)
+	if _, ok := a.Get(ctx, "k"); !ok {
+		t.Fatal("setter cannot read its own entry")
+	}
+	b.Delete(ctx, "k")
+	if _, ok := a.Get(ctx, "k"); ok {
+		t.Fatal("entry deleted by another store is still served from the index")
+	}
+}

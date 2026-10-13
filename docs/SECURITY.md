@@ -364,10 +364,12 @@ None of these is a personal-data store. Field contracts live in `docs/TOOLS.md` 
 - **Scope:** cookies and profile navigation stay on the saved site's registrable domain. Redirects to other hosts get nothing. SSRF checks run first.
 - **No leaks:** logs, audit events, metrics and exports carry a kind, a domain and a status. Never a cookie name or value. Erasure through `/admin/data` removes both kinds.
 - **No cache:** signed-in results skip every shared cache and the artifact store.
-- **Plaintext window:** while a profile lease is open, its work folder holds unencrypted cookies in a `0700` folder under `CACHE_DIR`. It is removed on every exit path and swept at startup if it is over an hour old.
-- **Browser flags:** profile browsers use the stock launch flags plus `disable-blink-features=AutomationControlled` (hides `navigator.webdriver`). No user-agent, time zone, stealth or incognito override.
+- **Plaintext window:** while a profile lease is open, its work folder holds unencrypted cookies in a `0700` folder under `CACHE_DIR`. It is removed on every exit path. Folders left by a crashed process are removed at startup, every 10 minutes while the server runs, and on every logout or erasure (the owner process is gone, or the folder is over 6 hours old).
+- **Browser:** profile browsers keep the browser sandbox and site isolation on, and use the stock launch flags plus `disable-blink-features=AutomationControlled` (hides `navigator.webdriver`). No user-agent, time zone, stealth or incognito override. On macOS and Linux the server talks to the browser over a private pipe, so no debugging port is opened (Windows uses a loopback port). In a container where the sandbox cannot start, set `CHROME_NO_SANDBOX=true` (the official images do).
 - **HTTP:** the server never attaches to a running browser. The login window opens only with `COOKIE_CAPTURE_IN_HTTP=true` and a display, and opens on the server host, so use it for self-hosted single-user setups.
-- **One process per cache:** saved logins live on local disk and each server process keeps its own in-memory state. A `site_logout` or erasure in one process does not reach another process that shares the same `CACHE_DIR`, so give each process its own cache dir, or use sticky routing with several pods.
+- **Several processes, one cache dir:** a `site_logout` or erasure leaves a deletion marker next to the files, so a login or scrape that started earlier in another process cannot save the profile again, and cookie reads check the file before using their in-memory copy. Locks and request spacing are per process.
+- **Signed-in content:** it is private and untrusted. The `authenticated` result field tells the model not to follow instructions in it and not to forward it unless the user asks.
+- **Login check:** a login window that closes with no new persistent cookie since it opened (only tracking cookies) is rejected as `not_signed_in` and nothing is stored.
 
 ---
 

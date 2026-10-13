@@ -105,6 +105,7 @@ func fastCapturer(t *testing.T, d Driver, slots int, timeout time.Duration) *Cap
 	t.Helper()
 	c := NewCapturer(d, nil, slots, timeout).WithProfiles(newTestProfileStore(t))
 	c.poll = 5 * time.Millisecond
+	c.baseline = 0 // most tests sign in at once; see TestLoginWindowNeedsNewCookie
 	return c
 }
 
@@ -224,7 +225,7 @@ func TestCaptureProfileDirRemovedOnEveryPath(t *testing.T) {
 		},
 		"cancel": func(t *testing.T) env {
 			ctx, cancel := context.WithCancel(context.Background())
-			time.AfterFunc(30*time.Millisecond, cancel)
+			time.AfterFunc(400*time.Millisecond, cancel)
 			return mk(t, &fakeDriver{sess: newFakeSession()}, 10*time.Second, ctx, cancel)
 		},
 		"nothing captured": func(t *testing.T) env {
@@ -416,4 +417,67 @@ func TestMultiInstanceCapturer(t *testing.T) {
 	if d1.dirs[0] == d2.dirs[0] {
 		t.Error("instances share a profile dir")
 	}
+}
+
+// sessionWithCookies lets a test change what the window holds while it runs.
+type mutableSession struct {
+	*fakeSession
+	mu sync.Mutex
+}
+
+func (m *mutableSession) Cookies(ctx context.Context) ([]Cookie, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.fakeSession.Cookies(ctx)
+}
+
+func (m *mutableSession) set(c ...Cookie) {
+	m.mu.Lock()
+	m.cookies = c
+	m.mu.Unlock()
+}
+
+func TestLoginWindowNeedsNewCookie(t *testing.T) {
+	tracker := persistCookie("_ga", "x", ".example.com")
+	run := func(t *testing.T, signIn bool) error {
+		t.Helper()
+		sess := &mutableSession{fakeSession: newFakeSession(tracker)}
+		// The driver hands out the mutable view so Cookies sees later changes.
+		d := &fakeDriver{sess: sess.fakeSession}
+		c := fastCapturer(t, &mutableDriver{fakeDriver: d, sess: sess}, 1, 5*time.Second)
+		c.baseline = 200 * time.Millisecond
+		go func() {
+			time.Sleep(400 * time.Millisecond)
+			if signIn {
+				sess.set(tracker, persistCookie("li_at", "secret", ".example.com"))
+				time.Sleep(50 * time.Millisecond)
+			}
+			sess.userClosesWindow()
+		}()
+		_, err := c.LoginWindow(context.Background(), subjA, "https://www.example.com/login")
+		return err
+	}
+	if err := run(t, false); !errors.Is(err, ErrNoSignInSeen) {
+		t.Fatalf("closing without signing in: got %v, want ErrNoSignInSeen", err)
+	}
+	if err := run(t, true); err != nil {
+		t.Fatalf("signing in: %v", err)
+	}
+}
+
+// mutableDriver returns the mutable session from Open.
+type mutableDriver struct {
+	*fakeDriver
+	sess *mutableSession
+}
+
+func (m *mutableDriver) Open(ctx context.Context, loginURL, dir string) (Session, error) {
+	if _, err := m.fakeDriver.Open(ctx, loginURL, dir); err != nil {
+		return nil, err
+	}
+	return m.sess, nil
+}
+
+func (m *mutableDriver) ReadCookies(ctx context.Context, dir string) ([]Cookie, error) {
+	return m.sess.Cookies(ctx)
 }

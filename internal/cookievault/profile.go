@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,9 +24,16 @@ const (
 	// MaxProfilesPerSubject bounds disk use per user.
 	MaxProfilesPerSubject = 10
 
-	profileMinGap    = 5 * time.Second
-	profileLockWait  = 30 * time.Second
-	staleWorkDirAge  = time.Hour
+	profileMinGap   = 5 * time.Second
+	profileLockWait = 30 * time.Second
+	staleWorkDirAge = time.Hour
+	// deadOwnerWorkDirAge removes a work folder whose owner process is still
+	// running (or cannot be told) after this long. No lease lasts that long.
+	deadOwnerWorkDirAge = 6 * time.Hour
+	sweepEvery          = 10 * time.Minute
+	// tombstoneAge outlives any lease; older tombstones are removed.
+	tombstoneAge     = 6 * time.Hour
+	tombstoneExt     = ".del"
 	profileFileExt   = ".wrp"
 	profileAADPrefix = "wrmcp-profile-v1|"
 )
@@ -77,8 +85,9 @@ type ProfileStore struct {
 	minGap   time.Duration
 	lockWait time.Duration
 
-	mu   sync.Mutex
-	keys map[string]*keyState
+	mu        sync.Mutex
+	keys      map[string]*keyState
+	lastSweep time.Time
 }
 
 // NewProfileStore opens (creating if needed) the archive directory dir, sealed
@@ -125,16 +134,11 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// sweep removes stale work dirs and expired or unreadable archives.
+// sweep removes abandoned work dirs, old tombstones, and expired or unreadable
+// archives.
 func (s *ProfileStore) sweep() {
+	s.sweepWork()
 	now := s.clock()
-	if entries, err := os.ReadDir(s.workDir); err == nil {
-		for _, e := range entries {
-			if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) > staleWorkDirAge {
-				removeDir(filepath.Join(s.workDir, e.Name()))
-			}
-		}
-	}
 	entries, _ := os.ReadDir(s.dir)
 	for _, e := range entries {
 		name := e.Name()
@@ -143,10 +147,64 @@ func (s *ProfileStore) sweep() {
 			if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) > staleWorkDirAge {
 				_ = os.Remove(filepath.Join(s.dir, name))
 			}
+		case strings.HasSuffix(name, tombstoneExt):
+			if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) > tombstoneAge {
+				_ = os.Remove(filepath.Join(s.dir, name))
+			}
 		case strings.HasSuffix(name, profileFileExt):
 			s.dropIfDead(strings.TrimSuffix(name, profileFileExt))
 		}
 	}
+}
+
+// maybeSweep runs sweep at most once per sweepEvery, so a long-running server
+// cleans up after crashed leases without scanning on every call.
+func (s *ProfileStore) maybeSweep() {
+	s.mu.Lock()
+	due := s.clock().Sub(s.lastSweep) > sweepEvery
+	if due {
+		s.lastSweep = s.clock()
+	}
+	s.mu.Unlock()
+	if due {
+		s.sweep()
+	}
+}
+
+// sweepWork removes work dirs that no live lease can own: the owner process (the
+// pid in the name) is gone, or the dir is older than the age limit. Dirs of
+// other running processes are left alone.
+func (s *ProfileStore) sweepWork() {
+	now := s.clock()
+	entries, err := os.ReadDir(s.workDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		age := now.Sub(info.ModTime())
+		pid, named := workDirPID(e.Name())
+		stale := age > staleWorkDirAge
+		if named {
+			stale = !pidAlive(pid) || age > deadOwnerWorkDirAge
+		}
+		if stale {
+			removeDir(filepath.Join(s.workDir, e.Name()))
+		}
+	}
+}
+
+// workDirPID extracts the owner pid from a "p-<pid>-<random>" work dir name.
+func workDirPID(name string) (int, bool) {
+	parts := strings.SplitN(name, "-", 3)
+	if len(parts) != 3 || parts[0] != "p" {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(parts[1])
+	return pid, err == nil && pid > 0
 }
 
 // dropIfDead deletes the archive for key when it is expired or unreadable. It
@@ -165,6 +223,38 @@ func profileKey(sub Subject, domain string) string {
 
 func subjectPrefix(sub Subject) string {
 	return hashPart(sub.TenantID) + "." + hashPart(sub.UserID) + "."
+}
+
+// keyPrefix returns the subject part of a profile key (through its last dot).
+func keyPrefix(key string) string { return key[:strings.LastIndex(key, ".")+1] }
+
+// A tombstone is an empty marker file written when a profile or a subject's
+// profiles are deleted. A lease that began before it must not save, even when
+// the deletion ran in another process that shares the directory.
+func (s *ProfileStore) keyTombstone(key string) string { return filepath.Join(s.dir, key+tombstoneExt) }
+func (s *ProfileStore) subjectTombstone(prefix string) string {
+	return filepath.Join(s.dir, prefix+"erased"+tombstoneExt)
+}
+
+func (s *ProfileStore) writeTombstone(path string) {
+	now := time.Now()
+	if err := os.WriteFile(path, nil, 0o600); err == nil {
+		err = os.Chtimes(path, now, now)
+		if err == nil {
+			return
+		}
+	}
+	slog.Warn("could not write a deletion marker; other server processes may not see this deletion")
+}
+
+// revokedSince reports whether key (or its subject) was deleted after t.
+func (s *ProfileStore) revokedSince(key string, t time.Time) bool {
+	for _, p := range []string{s.keyTombstone(key), s.subjectTombstone(keyPrefix(key))} {
+		if info, err := os.Stat(p); err == nil && !info.ModTime().Before(t) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *ProfileStore) path(key string) string { return filepath.Join(s.dir, key+profileFileExt) }
@@ -273,7 +363,10 @@ type ProfileLease struct {
 	key   string
 	ks    *keyState
 	gen   int
-	once  sync.Once
+	// started is when the lease began (wall clock), compared with the mtime of
+	// deletion tombstones left by other processes.
+	started time.Time
+	once    sync.Once
 }
 
 // Has reports whether a live saved profile exists for host's registrable domain.
@@ -340,11 +433,13 @@ func (s *ProfileStore) Begin(ctx context.Context, sub Subject, host string) (*Pr
 }
 
 func (s *ProfileStore) begin(ctx context.Context, key, domain string) (*ProfileLease, error) {
+	s.maybeSweep()
 	ks, err := s.lock(ctx, key)
 	if err != nil {
 		return nil, err
 	}
-	dir, err := os.MkdirTemp(s.workDir, "p-*")
+	started := time.Now()
+	dir, err := os.MkdirTemp(s.workDir, "p-"+strconv.Itoa(os.Getpid())+"-*")
 	if err != nil {
 		s.unlock(ks)
 		return nil, fmt.Errorf("create profile work dir: %w", err)
@@ -352,7 +447,7 @@ func (s *ProfileStore) begin(ctx context.Context, key, domain string) (*ProfileL
 	s.mu.Lock()
 	gen := ks.gen
 	s.mu.Unlock()
-	l := &ProfileLease{Dir: dir, store: s, key: key, ks: ks, gen: gen, Fresh: true,
+	l := &ProfileLease{Dir: dir, store: s, key: key, ks: ks, gen: gen, started: started, Fresh: true,
 		Meta: ProfileMeta{Domain: domain, CreatedAt: s.clock(), ExpiresAt: s.clock().Add(s.ttl)}}
 
 	f, err := os.Open(s.path(key))
@@ -380,9 +475,11 @@ func (s *ProfileStore) begin(ctx context.Context, key, domain string) (*ProfileL
 }
 
 // countFor counts the subject's live archives.
-func (s *ProfileStore) countFor(sub Subject) int {
+func (s *ProfileStore) countFor(sub Subject) int { return s.countPrefix(subjectPrefix(sub)) }
+
+func (s *ProfileStore) countPrefix(prefix string) int {
 	n := 0
-	for _, k := range s.keysFor(sub) {
+	for _, k := range s.keysForPrefix(prefix) {
 		if _, ok := s.readMeta(k); ok {
 			n++
 		}
@@ -390,8 +487,10 @@ func (s *ProfileStore) countFor(sub Subject) int {
 	return n
 }
 
-func (s *ProfileStore) keysFor(sub Subject) []string {
-	matches, _ := filepath.Glob(filepath.Join(s.dir, subjectPrefix(sub)+"*"+profileFileExt))
+func (s *ProfileStore) keysFor(sub Subject) []string { return s.keysForPrefix(subjectPrefix(sub)) }
+
+func (s *ProfileStore) keysForPrefix(prefix string) []string {
+	matches, _ := filepath.Glob(filepath.Join(s.dir, prefix+"*"+profileFileExt))
 	keys := make([]string, 0, len(matches))
 	for _, m := range matches {
 		keys = append(keys, strings.TrimSuffix(filepath.Base(m), profileFileExt))
@@ -459,9 +558,15 @@ func (s *ProfileStore) commit(ctx context.Context, l *ProfileLease) (ProfileSumm
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if l.ks.gen != l.gen {
+	if l.ks.gen != l.gen || s.revokedSince(l.key, l.started) {
 		cleanup()
 		return ProfileSummary{}, ErrNoProfile
+	}
+	// Begin checked the cap before the browser ran; another login may have used
+	// the last slot since.
+	if _, err := os.Stat(s.path(l.key)); errors.Is(err, os.ErrNotExist) && s.countPrefix(keyPrefix(l.key)) >= MaxProfilesPerSubject {
+		cleanup()
+		return ProfileSummary{}, ErrTooManyProfiles
 	}
 	if err := os.Rename(tmpName, s.path(l.key)); err != nil {
 		cleanup()
@@ -478,8 +583,10 @@ func (s *ProfileStore) Delete(ctx context.Context, sub Subject, host string) (bo
 		return false, err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.deleteLocked(key)
+	ok, err := s.deleteLocked(key)
+	s.mu.Unlock()
+	s.sweepWork() // plaintext folders of crashed leases go with the login
+	return ok, err
 }
 
 // deleteLocked removes key's archive and invalidates any lease in flight. A
@@ -490,6 +597,7 @@ func (s *ProfileStore) deleteLocked(key string) (bool, error) {
 		ks.gen++
 	}
 	err := os.Remove(s.path(key))
+	s.writeTombstone(s.keyTombstone(key))
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
@@ -517,7 +625,13 @@ func (s *ProfileStore) EraseAll(ctx context.Context, sub Subject) (int, error) {
 		return 0, ErrNoSubject
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	n, err := s.eraseLocked(sub)
+	s.mu.Unlock()
+	s.sweepWork()
+	return n, err
+}
+
+func (s *ProfileStore) eraseLocked(sub Subject) (int, error) {
 	// A first-time login has no archive yet; bump its generation so it cannot
 	// commit after the erasure.
 	prefix := subjectPrefix(sub)
@@ -526,6 +640,7 @@ func (s *ProfileStore) EraseAll(ctx context.Context, sub Subject) (int, error) {
 			ks.gen++
 		}
 	}
+	s.writeTombstone(s.subjectTombstone(prefix))
 	n := 0
 	var errs []error
 	for _, k := range s.keysFor(sub) {

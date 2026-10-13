@@ -291,7 +291,7 @@ func (p *PersistStore) writeIndex(ctx context.Context, s Subject, domains []stri
 	}
 	sort.Strings(domains)
 	data, _ := json.Marshal(domains)
-	p.kv.Set(ctx, indexKey(s), data, 0)
+	p.kv.Set(ctx, indexKey(s), data, p.ttl)
 }
 
 func (p *PersistStore) addToIndex(ctx context.Context, s Subject, domain string) {
