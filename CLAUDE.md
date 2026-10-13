@@ -51,7 +51,7 @@ internal/
 ├── datasubject/  # GDPR access/erasure registry: (tenantID,userID) Exporter/Eraser fan-out across all personal-data stores
 ├── useranalytics/# Opt-in consent-gated per-user usage analytics (Recorder + Noop)
 ├── memory/       # Opt-in consent-gated long-term cross-session memory (Store + Noop, retention TTL)
-├── cookievault/  # Opt-in encrypted per-user login-cookie vault + headed login capturer (site_login/site_logout); scrape_page injects cookies via scraper.WithCookies, bypassing every cache (#241)
+├── cookievault/  # Opt-in encrypted per-user login vault (site_login/site_logout): cookie bundles + tool-owned browser profiles (ProfileStore, AES-GCM archive, per-profile lease) and a headed login capturer; scrape_page uses a profile (scraper.ScrapeWithProfile) or cookies (scraper.WithCookies), bypassing every cache (#241, #775)
 ├── workspace/    # Opt-in shared research workspaces — server enforces data-plane + isolation, host owns membership (Store + Noop)
 ├── metrics/      # Prometheus counters/histograms per tool + per-tenant aggregate analytics + bounded recent-errors ring (diagnostics://errors/recent)
 ├── ratelimit/    # Token bucket (per-IP pre-auth + per-tenant + global) + optional atomic cross-pod daily quota (Redis)

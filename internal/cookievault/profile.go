@@ -101,7 +101,7 @@ func NewProfileStore(dir, hexKey string, ttl time.Duration) (*ProfileStore, erro
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, fmt.Errorf("profile store dir: %w", err)
 		}
-		if err := os.Chmod(d, 0o700); err != nil {
+		if err := os.Chmod(d, 0o700); err != nil { // #nosec G302 -- directory: owner-only, needs the execute bit
 			return nil, fmt.Errorf("profile store dir: %w", err)
 		}
 	}

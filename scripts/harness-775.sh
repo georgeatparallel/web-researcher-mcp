@@ -6,7 +6,7 @@ set -uo pipefail
 # then exits non-zero if any gate failed. Re-run after any change to
 # internal/cookievault (profile*.go), internal/cache/streamcrypto.go, the profile
 # scrape path in internal/scraper, internal/tools/site_session.go or scrape.go.
-# Sibling of scripts/harness-775.sh, which still has to pass.
+# Sibling of scripts/harness-241.sh, which still has to pass.
 #
 # Every named test must run AND pass: a name that matches nothing fails the
 # gate, so a missing test can never read as green.
@@ -64,7 +64,7 @@ run_named_tests() {
 
 export -f run_named_tests
 
-NEW_FILES="internal/cache/streamcrypto.go internal/cookievault/profile.go internal/cookievault/profile_archive.go internal/cookievault/profile_login.go internal/scraper/profile_browser.go"
+NEW_FILES="internal/cache/streamcrypto.go internal/cookievault/profile.go internal/cookievault/profile_archive.go internal/cookievault/profile_browser.go internal/scraper/profile_browser.go"
 
 run_gate "Lint (golangci-lint)" \
   "$OUT_DIR/775-01-lint.log" \
@@ -95,7 +95,6 @@ run_gate "Multi-instance isolation (rules 1, 2)" \
   bash -c '
     set -e
     run_named_tests -race -- ./internal/cookievault/ "TestMultiInstanceProfileStore TestProfileStoreSubjectIsolation"
-    run_named_tests -race -- ./internal/tools/ "TestProfileScrapeAcrossIdentities"
   '
 
 run_gate "Dead-code scan (go vet + unused via lint)" \
@@ -107,9 +106,9 @@ run_gate "Unit/integration tests (rules 1-16)" \
   bash -c '
     set -e
     run_named_tests -race -- ./internal/cache/ "TestStreamCryptoRoundTrip TestStreamCryptoTamperTruncation"
-    run_named_tests -race -- ./internal/cookievault/ "TestProfileArchiveEncryptedAtRest TestProfileTempDirRemovedOnAllExits TestStaleProfileTempDirsSwept TestProfileExtractRejectsTraversalAndLinks TestProfileLoginVerifiesPersistedCookies TestProfileScrapeSerialized TestProfileScrapeMinSpacing TestProfileScrapeBusyAfterWait TestProfileArchiveExcludesCaches TestProfileArchiveSizeCap TestProfileArchiveTTL TestProfileScrapeRepacksState TestVaultDataSubjectRoundTrip TestCaptureProfileDirRemovedOnEveryPath"
-    run_named_tests -race -- ./internal/scraper/ "TestBrowserProfileModeNoOverrides TestProfileBlocksOffDomainNavigation TestProfileScrapeWaitsForLateContent TestProfileScrapeHonorsBrowserTierLimit"
-    run_named_tests -race -- ./internal/tools/ "TestSiteLoginProfileRequiresConsent TestScrapeSkipsProfileWithoutConsent TestSiteLoginRegistrationByTransport TestSiteLogoutRemovesProfile TestLoginReplacesOtherKind TestProfileScrapeNoRetryOnLoginWall TestProfileAuditEvents TestProfileMetrics TestScrapePageAnonymousSkipsLogin TestVaultBackedScrapeBypassesCache TestAnonymousAfterAuthenticatedNeverServedFromCache TestCanaryCookieNeverLeaks TestSiteLoginDescriptionDisclosesToS TestToolsDocMatchesRegistry TestAllToolsHaveAnnotations"
+    run_named_tests -race -- ./internal/cookievault/ "TestProfileArchiveEncryptedAtRest TestProfileTempDirRemovedOnAllExits TestStaleProfileTempDirsSwept TestProfileExtractRejectsTraversalAndLinks TestProfileLoginVerifiesPersistedCookies TestProfileScrapeSerialized TestProfileScrapeMinSpacing TestProfileScrapeBusyAfterWait TestProfileArchiveExcludesCaches TestProfileArchiveSizeCap TestProfileArchiveTTL TestProfileScrapeRepacksState TestVaultDataSubjectRoundTrip TestCaptureProfileDirRemovedOnEveryPath TestBrowserProfileModeNoOverrides"
+    run_named_tests -race -- ./internal/scraper/ "TestProfileBlocksOffDomainNavigation TestProfileScrapeWaitsForLateContent TestProfileScrapeHonorsBrowserTierLimit"
+    run_named_tests -race -- ./internal/tools/ "TestSiteLoginProfileRequiresConsent TestScrapeProfileGating TestScrapeProfileRawModeRefused TestSiteLogoutRemovesProfile TestLoginReplacesOtherKind TestProfileAuditAndMetrics TestScrapeAnonymousSkipsCookieLogin TestLoginHintForProfileNeedsWindow TestVaultBackedScrapeBypassesCache TestAnonymousAfterAuthenticatedNeverServedFromCache TestCanaryCookieNeverLeaks TestSiteLoginDescriptionDisclosesToS TestToolsDocMatchesRegistry TestAllToolsHaveAnnotations"
     run_named_tests -race -- ./internal/config/ "TestConfigCookieCaptureInHTTP TestConfigProfileTTL"
     run_named_tests -tags=live -- ./internal/cookievault/ "TestProfileLoginFastCloseLive"
     make check-python-drift
@@ -119,7 +118,7 @@ run_gate "E2E (real binary, profile scrape over STDIO and HTTP, recorded proof)"
   "$OUT_DIR/775-06-e2e.log" \
   bash -c '
     set -e
-    run_named_tests -tags=e2e -- ./tests/e2e/ "TestE2EProfileScrapeSTDIO TestE2EProfileScrapeHTTP"
+    run_named_tests -tags=e2e -- ./tests/e2e/ "TestE2EProfileScrapeSTDIO TestE2EProfileScrapeHTTP TestE2EProfileScrapeAcrossIdentities TestE2ESiteLoginRegistrationByTransport"
   '
 
 echo

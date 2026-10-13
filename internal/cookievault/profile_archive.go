@@ -102,6 +102,14 @@ func writeProfileArchive(dst io.Writer, gcm cipher.AEAD, aad []byte, root string
 		return err
 	}
 
+	// Files are opened through an os.Root, so a symlink swapped in during the walk
+	// cannot lead the read outside the profile dir.
+	rootDir, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rootDir.Close() }()
+
 	var total int64
 	var files int
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -133,7 +141,7 @@ func writeProfileArchive(dst io.Writer, gcm cipher.AEAD, aad []byte, root string
 		if err := tw.WriteHeader(&tar.Header{Name: filepath.ToSlash(rel), Mode: 0o600, Size: info.Size(), Typeflag: tar.TypeReg}); err != nil {
 			return err
 		}
-		f, err := os.Open(path) // #nosec G304 -- path comes from walking our own 0700 temp dir
+		f, err := rootDir.Open(rel)
 		if err != nil {
 			return err
 		}
