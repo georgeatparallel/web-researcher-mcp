@@ -68,7 +68,7 @@ export SEARCH_ROUTING='{"web":"parallel,duckduckgo","images":"duckduckgo","news"
 
 Current defaults are unchanged.
 
-The adapter connects to `https://search.parallel.ai/mcp` using Streamable HTTP and the bundled MCP SDK. By default it sends no Parallel credentials; anonymous access is intended for exploration and light use and is subject to service rate limits. Set `PARALLEL_API_KEY` (from [platform.parallel.ai](https://platform.parallel.ai)) to send it as a Bearer token and raise that limit — the key is read only when `PARALLEL_ENABLED=true`.
+The adapter connects to `https://search.parallel.ai/mcp` using Streamable HTTP and the bundled MCP SDK. By default it sends no Parallel credentials; anonymous access is intended for exploration and light use and is subject to service rate limits. Set `PARALLEL_API_KEY` (from [platform.parallel.ai](https://platform.parallel.ai)) to send it as a Bearer token and raise that limit — the key is read only when `PARALLEL_ENABLED=true`, and is sent only to the scheme and host of that endpoint, never to a host a redirect names.
 
 Every call carries a `session_id`: a random 32-character hex value generated once per server process and reused for the life of that process. Parallel keys free-tier rate limiting and log correlation on it and documents reusing one stable value rather than minting one per call, which would split the accounting. It is derived from `crypto/rand` and carries no user, tenant, or query data.
 
