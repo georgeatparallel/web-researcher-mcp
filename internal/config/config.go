@@ -399,7 +399,7 @@ func Load() (*Config, error) {
 		errs = append(errs, "XQUIK_API_KEY is required when SEARCH_PROVIDER=xquik")
 	}
 
-	// Parallel is keyless, so the opt-in toggle — not a credential — is what
+	// Parallel is keyless, so the opt-in toggle, not a credential, is what
 	// authorizes egress to it. Fail closed when it is selected without one.
 	parallelEnabled := envBool("PARALLEL_ENABLED", false)
 	if provider == "parallel" && !parallelEnabled {

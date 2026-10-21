@@ -237,12 +237,12 @@ The **operator-observability** surfaces added in the routing-observability work 
 
 ### Optional Third-Party Search Egress (Parallel)
 
-The `parallel` search provider is off unless an operator sets `PARALLEL_ENABLED=true`. Every other provider is gated by a credential, which is itself an act of opt-in; Parallel is keyless, so the toggle takes that role — without it the provider is never constructed and cannot be reached by `SEARCH_PROVIDER`, `SEARCH_ROUTING`, or a per-call `provider: "parallel"`.
+The `parallel` search provider is off unless an operator sets `PARALLEL_ENABLED=true`. Every other provider is gated by a credential, which is itself an act of opt-in; Parallel is keyless, so the toggle takes that role. Without it the provider is never constructed and cannot be reached by `SEARCH_PROVIDER`, `SEARCH_ROUTING`, or a per-call `provider: "parallel"`.
 
 Operators enabling it should know:
 
-- **Queries go to a third party you have no relationship with.** There is no account, no contract, and no data processing agreement behind an anonymous request. The query text, and a random per-process session identifier Parallel uses for free-tier rate limiting, leave your deployment.
-- **Review Parallel's own terms before enabling.** We do not restate or summarize what they permit — read them directly: [Parallel Customer Terms](https://parallel.ai/customer-terms) and [Privacy Policy](https://parallel.ai/privacy-policy). Whether that is acceptable is an operator decision, not one this project can make for you.
+- **Queries go to a third party.** An anonymous request has no account and no signed DPA. The query text, a random session identifier, and your IP address leave your deployment. The session identifier is generated once per process, so every user and tenant on that instance shares it.
+- **Review Parallel's own terms before enabling.** Read them directly: [Parallel Customer Terms](https://parallel.ai/customer-terms) and [Privacy Policy](https://parallel.ai/privacy-policy). Whether the terms apply to anonymous use is unconfirmed. The Customer Terms may allow Parallel to use queries to improve its services and may restrict caching of outputs, and this server caches search results. Verify both. Whether that is acceptable is an operator decision, not one this project can make for you.
 - **Regulated deployments should leave it off.** If your deployment is subject to GDPR processor obligations, HIPAA, or any regime that requires a DPA, contractual data-handling terms, or vendor due diligence for every subprocessor, do not enable this provider. Use a provider you hold an agreement with, or self-host SearXNG.
 
 See [`docs/PRIVACY.md`](PRIVACY.md) for the data-flow row and [`docs/DEPLOYMENT.md`](DEPLOYMENT.md#environment-variables) for the variables.

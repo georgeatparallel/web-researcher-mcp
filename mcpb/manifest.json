@@ -89,7 +89,7 @@
     "PARALLEL_ENABLED": {
       "type": "boolean",
       "title": "Enable Parallel Search",
-      "description": "Allow the keyless Parallel Search MCP provider. Off by default: queries go to a third party with no account or DPA \u2014 review https://parallel.ai/customer-terms first",
+      "description": "Allow the keyless Parallel Search MCP provider. Off by default: queries go to a third party with no account or signed DPA. Review https://parallel.ai/customer-terms first",
       "required": false,
       "default": false
     },

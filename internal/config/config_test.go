@@ -133,7 +133,7 @@ func TestLoadXQuikAPIKeyThreaded(t *testing.T) {
 }
 
 // TestLoadParallelOptIn pins the egress gate: Parallel is keyless, so the
-// PARALLEL_ENABLED toggle — not a credential — is what authorizes it, and
+// PARALLEL_ENABLED toggle, not a credential, authorizes it, and
 // selecting it without one must fail fast at startup.
 func TestLoadParallelOptIn(t *testing.T) {
 	t.Run("selected without opt-in", func(t *testing.T) {

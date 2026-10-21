@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -66,6 +67,17 @@ func newParallelSessionID() string {
 	return hex.EncodeToString(buf[:])
 }
 
+// cleanParallelText drops control characters and collapses whitespace, so a
+// term can't carry newlines or NULs into the upstream query.
+func cleanParallelText(s string) string {
+	return strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)), " ")
+}
+
 func (p *ParallelProvider) Name() string { return "parallel" }
 
 func (p *ParallelProvider) Web(ctx context.Context, params WebSearchParams) ([]SearchResult, error) {
@@ -89,7 +101,8 @@ func (p *ParallelProvider) News(context.Context, NewsSearchParams) ([]NewsResult
 }
 
 func (p *ParallelProvider) search(ctx context.Context, params WebSearchParams) ([]SearchResult, error) {
-	if strings.TrimSpace(params.Query) == "" {
+	params.Query = cleanParallelText(params.Query)
+	if params.Query == "" {
 		return nil, fmt.Errorf("parallel: query is required")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -113,11 +126,13 @@ func (p *ParallelProvider) search(ctx context.Context, params WebSearchParams) (
 	defer session.Close()
 
 	query := buildQuery(params)
-	if params.ExactTerms != "" {
-		query += " " + strconv.Quote(params.ExactTerms)
+	if exact := cleanParallelText(strings.ReplaceAll(params.ExactTerms, `"`, " ")); exact != "" {
+		query += ` "` + exact + `"`
 	}
 	for _, term := range strings.Fields(params.ExcludeTerms) {
-		query += " -" + term
+		if term = strings.TrimLeft(cleanParallelText(term), "-"); term != "" {
+			query += " -" + term
+		}
 	}
 	objective := query
 	if params.TimeRange != "" {
@@ -248,6 +263,9 @@ func parallelResults(result *mcp.CallToolResult, count int) ([]SearchResult, err
 	for _, item := range *response.Results {
 		if len(results) >= count {
 			break
+		}
+		if u, err := url.Parse(item.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			continue
 		}
 		results = append(results, SearchResult{
 			Title: item.Title, URL: item.URL, Snippet: truncateText(strings.Join(item.Excerpts, "\n\n"), parallelMaxSnippetRunes),

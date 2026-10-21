@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -439,5 +440,101 @@ func TestParallelAPIKeyStaysOnParallelHost(t *testing.T) {
 				t.Errorf("redirect target %s: seen=%v Authorization=%q, want no key", location, ok, got)
 			}
 		})
+	}
+}
+
+func TestParallelBuildsCleanQuery(t *testing.T) {
+	t.Parallel()
+	var got struct {
+		Objective string
+		Queries   []string
+	}
+	deps, _ := parallelTestDeps(t, func(_ http.ResponseWriter, _ *http.Request, args json.RawMessage) any {
+		var call struct {
+			Arguments struct {
+				Objective string   `json:"objective"`
+				Queries   []string `json:"search_queries"`
+			} `json:"arguments"`
+		}
+		if err := json.Unmarshal(args, &call); err != nil {
+			t.Error(err)
+			return nil
+		}
+		got.Objective, got.Queries = call.Arguments.Objective, call.Arguments.Queries
+		return map[string]any{"content": []any{}, "structuredContent": json.RawMessage(parallelSample)}
+	})
+	p := NewParallelProvider("", deps)
+	_, err := p.Web(context.Background(), WebSearchParams{
+		Query: "  go \n modules ", ExactTerms: "a \"b\"\n é", ExcludeTerms: "-foo bar --baz -",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `go modules "a b é" -foo -bar -baz`
+	if len(got.Queries) != 1 || got.Queries[0] != want || got.Objective != want {
+		t.Fatalf("query = %q, objective = %q, want %q", got.Queries, got.Objective, want)
+	}
+	if _, err := p.Web(context.Background(), WebSearchParams{Query: "\x00\n "}); err == nil {
+		t.Fatal("control-only query must be rejected")
+	}
+}
+
+func TestParallelResultsDropsNonHTTPURLs(t *testing.T) {
+	t.Parallel()
+	payload := `{"results":[
+		{"url":"javascript:alert(1)","title":"a"},
+		{"url":"file:///etc/passwd","title":"b"},
+		{"url":"","title":"c"},
+		{"url":"https:///nohost","title":"d"},
+		{"url":"https://example.com/ok","title":"e"}]}`
+	result := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: payload}}}
+	results, err := parallelResults(result, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].URL != "https://example.com/ok" {
+		t.Fatalf("expected only the https result, got %+v", results)
+	}
+}
+
+func TestParallelLeavesSharedClientAlone(t *testing.T) {
+	t.Parallel()
+	deps, _ := parallelTestDepsAuth(t, "Bearer key", func(http.ResponseWriter, *http.Request, json.RawMessage) any {
+		return map[string]any{"content": []any{}, "structuredContent": json.RawMessage(parallelSample)}
+	})
+	before := deps.HTTPClient.Transport
+	if _, err := NewParallelProvider("key", deps).Web(context.Background(), WebSearchParams{Query: "Go"}); err != nil {
+		t.Fatal(err)
+	}
+	if deps.HTTPClient.Transport != before {
+		t.Fatal("Parallel replaced the shared client's transport")
+	}
+}
+
+func TestParallelTransportBoundsResponseBody(t *testing.T) {
+	t.Parallel()
+	base := parallelRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{},
+			Body:       io.NopCloser(strings.NewReader(strings.Repeat("x", parallelMaxBytes+100))),
+			Request:    r,
+		}, nil
+	})
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, parallelMCPURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := parallelTransport{base: base}.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) != parallelMaxBytes {
+		t.Fatalf("body = %d bytes, want it capped at %d", len(body), parallelMaxBytes)
 	}
 }

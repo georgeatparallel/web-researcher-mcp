@@ -128,7 +128,7 @@ Which tools each web search provider enables. `—` means the provider returns e
 
 ### Provider Notes
 
-**[Parallel](https://docs.parallel.ai/integrations/mcp/search-mcp)** — Keyless web search through Streamable HTTP MCP, returning source excerpts from Fast mode. Because it needs no credential, `PARALLEL_ENABLED=true` is the operator opt-in that authorizes egress to it; an optional `PARALLEL_API_KEY` raises the anonymous rate limit. No image/news search or scrape fallback tier is added. See [setup and supported options](API_SETUP.md#parallel-keyless-web-search) and the [third-party egress note](SECURITY_AND_COMPLIANCE.md#optional-third-party-search-egress-parallel).
+**[Parallel](https://docs.parallel.ai/integrations/mcp/search-mcp)**: Keyless web search through Streamable HTTP MCP, returning source excerpts from Fast mode. Because it needs no credential, `PARALLEL_ENABLED=true` is the operator opt-in that authorizes egress to it; an optional `PARALLEL_API_KEY` raises the anonymous rate limit. No image/news search or scrape fallback tier is added. See [setup and supported options](API_SETUP.md#parallel-keyless-web-search) and the [third-party egress note](SECURITY_AND_COMPLIANCE.md#optional-third-party-search-egress-parallel).
 
 **[DuckDuckGo](https://duckduckgo.com/)** — The zero-config default. No API key, no registration, no rate limit to configure. Result depth is lower than keyed providers; image and news results are present but less comprehensive. Use as a fallback, not a primary.
 
