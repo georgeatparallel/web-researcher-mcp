@@ -235,6 +235,18 @@ We deliberately minimize what we store:
 
 The **operator-observability** surfaces added in the routing-observability work (`_meta.routing` on results, the `diagnostics://` resources, and the admin-gated `GET /dashboard`) are deliberately privacy-minimal: routing detail exposes only the provider *name* (never upstream URLs, credentials, or breaker internals), the recent-errors ring is memory-only/bounded/redacted/tenant-scoped, and the dashboard is aggregate-only and admin-gated. None of them is a personal-data store, so none adds a GDPR processing obligation. See `docs/DEPLOYMENT.md` → Operator Observability and `docs/TOOLS.md` → Routing Provenance.
 
+### Optional Third-Party Search Egress (Parallel)
+
+The `parallel` search provider is off unless an operator sets `PARALLEL_ENABLED=true`. Every other provider is gated by a credential, which is itself an act of opt-in; Parallel is keyless, so the toggle takes that role — without it the provider is never constructed and cannot be reached by `SEARCH_PROVIDER`, `SEARCH_ROUTING`, or a per-call `provider: "parallel"`.
+
+Operators enabling it should know:
+
+- **Queries go to a third party you have no relationship with.** There is no account, no contract, and no data processing agreement behind an anonymous request. The query text, and a random per-process session identifier Parallel uses for free-tier rate limiting, leave your deployment.
+- **Review Parallel's own terms before enabling.** We do not restate or summarize what they permit — read them directly: [Parallel Customer Terms](https://parallel.ai/customer-terms) and [Privacy Policy](https://parallel.ai/privacy-policy). Whether that is acceptable is an operator decision, not one this project can make for you.
+- **Regulated deployments should leave it off.** If your deployment is subject to GDPR processor obligations, HIPAA, or any regime that requires a DPA, contractual data-handling terms, or vendor due diligence for every subprocessor, do not enable this provider. Use a provider you hold an agreement with, or self-host SearXNG.
+
+See [`docs/PRIVACY.md`](PRIVACY.md) for the data-flow row and [`docs/DEPLOYMENT.md`](DEPLOYMENT.md#environment-variables) for the variables.
+
 ### Purpose Limitation
 
 Each feature declares its data processing purpose explicitly. Core principles:

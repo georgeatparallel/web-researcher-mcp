@@ -99,7 +99,7 @@ Which tools each web search provider enables. `—` means the provider returns e
 | **[You.com](https://you.com/docs/api-reference/search/v1-search)** | API key with free credits | $5 / 1,000 calls |
 | **[Exa](https://exa.ai/)** | 1,000 requests/month | Per call beyond free tier |
 | **[Tavily](https://app.tavily.com/)** | Monthly dev credits | Paid plans |
-| **[Parallel](https://docs.parallel.ai/integrations/mcp/search-mcp)** | Keyless anonymous access for light use, rate limited | This adapter uses anonymous access only |
+| **[Parallel](https://docs.parallel.ai/integrations/mcp/search-mcp)** | Keyless anonymous access for light use, rate limited | Optional `PARALLEL_API_KEY` raises the limit |
 | **[Xquik](https://xquik.com/#pricing)** | No free tier documented | Metered credits; current rates appear on the pricing and checkout pages |
 
 ---
@@ -113,7 +113,7 @@ Which tools each web search provider enables. `—` means the provider returns e
 | High-volume + own index | [Brave](https://brave.com/search/api/) (2,000/month free, privacy-first) |
 | Independent results alongside Google | [Brave](https://brave.com/search/api/) or [Exa](https://exa.ai/) (different indices, no overlap) |
 | Semantic / conceptual search | [Exa](https://exa.ai/) |
-| Keyless web search with excerpts | [Parallel](https://docs.parallel.ai/integrations/mcp/search-mcp) (`SEARCH_PROVIDER=parallel`) |
+| Keyless web search with excerpts | [Parallel](https://docs.parallel.ai/integrations/mcp/search-mcp) (`PARALLEL_ENABLED=true` + `SEARCH_PROVIDER=parallel`) |
 | LLM-ready extracted content | [Tavily](https://app.tavily.com/) |
 | Web + news search with query-aware snippets | [You.com](https://you.com/docs/api-reference/search/v1-search) |
 | Air-gapped or no vendor lock-in | [SearXNG](https://docs.searxng.org/) (self-hosted) |
@@ -128,7 +128,7 @@ Which tools each web search provider enables. `—` means the provider returns e
 
 ### Provider Notes
 
-**[Parallel](https://docs.parallel.ai/integrations/mcp/search-mcp)** — Opt-in keyless web search through Streamable HTTP MCP. Anonymous search uses Fast mode and returns source excerpts. No image/news search or scrape fallback tier is added. See [setup and supported options](API_SETUP.md#parallel-keyless-web-search).
+**[Parallel](https://docs.parallel.ai/integrations/mcp/search-mcp)** — Keyless web search through Streamable HTTP MCP, returning source excerpts from Fast mode. Because it needs no credential, `PARALLEL_ENABLED=true` is the operator opt-in that authorizes egress to it; an optional `PARALLEL_API_KEY` raises the anonymous rate limit. No image/news search or scrape fallback tier is added. See [setup and supported options](API_SETUP.md#parallel-keyless-web-search) and the [third-party egress note](SECURITY_AND_COMPLIANCE.md#optional-third-party-search-egress-parallel).
 
 **[DuckDuckGo](https://duckduckgo.com/)** — The zero-config default. No API key, no registration, no rate limit to configure. Result depth is lower than keyed providers; image and news results are present but less comprehensive. Use as a fallback, not a primary.
 
