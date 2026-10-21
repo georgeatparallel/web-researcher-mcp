@@ -21,6 +21,9 @@ const (
 	parallelMaxBytes  = 5 * 1024 * 1024
 )
 
+// parallelMaxSnippetRunes bounds vendor-supplied excerpt text per result.
+const parallelMaxSnippetRunes = 2000
+
 var _ Provider = (*ParallelProvider)(nil)
 
 // ParallelProvider searches through the anonymous Parallel Search MCP endpoint.
@@ -182,7 +185,7 @@ func parallelResults(result *mcp.CallToolResult, count int) ([]SearchResult, err
 			break
 		}
 		results = append(results, SearchResult{
-			Title: item.Title, URL: item.URL, Snippet: strings.Join(item.Excerpts, "\n\n"),
+			Title: item.Title, URL: item.URL, Snippet: truncateText(strings.Join(item.Excerpts, "\n\n"), parallelMaxSnippetRunes),
 			DisplayLink: extractDisplayLink(item.URL),
 			PublishedAt: normalizePublishedAt(item.PublishDate, time.Now()),
 		})
