@@ -213,3 +213,12 @@ func TestParallelUnsupportedAndLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestParallelResultsRejectsOversizedPayload(t *testing.T) {
+	t.Parallel()
+	big := strings.Repeat("x", parallelMaxBytes+1)
+	result := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: big}}}
+	if _, err := parallelResults(result, 5); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("expected size error, got %v", err)
+	}
+}

@@ -161,6 +161,9 @@ func parallelResults(result *mcp.CallToolResult, count int) ([]SearchResult, err
 			}
 		}
 	}
+	if len(data) > parallelMaxBytes {
+		return nil, fmt.Errorf("parallel: search result exceeds %d bytes", parallelMaxBytes)
+	}
 	var response struct {
 		Results *[]struct {
 			URL         string   `json:"url"`
