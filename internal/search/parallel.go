@@ -19,10 +19,16 @@ const (
 	parallelMCPURL    = "https://search.parallel.ai/mcp"
 	parallelUserAgent = "web-researcher-mcp (+https://github.com/zoharbabin/web-researcher-mcp)"
 	parallelMaxBytes  = 5 * 1024 * 1024
+	parallelMaxErrLen = 1024 // runes of an upstream error message kept in ours
+	// parallelMaxRetryAfter caps a Retry-After the endpoint advertises. The
+	// breaker stays open for at least that long, so an absurd (or hostile)
+	// header must not be able to disable the provider indefinitely.
+	parallelMaxRetryAfter = 15 * time.Minute
 )
 
-// parallelMaxSnippetRunes bounds vendor-supplied excerpt text per result.
-const parallelMaxSnippetRunes = 2000
+// parallelMaxSnippetRunes bounds vendor-supplied excerpt text per result,
+// matching the cap the Exa adapter applies to its own extracted text.
+const parallelMaxSnippetRunes = 500
 
 var _ Provider = (*ParallelProvider)(nil)
 
@@ -105,11 +111,7 @@ func (p *ParallelProvider) search(ctx context.Context, params WebSearchParams) (
 	if result.IsError {
 		for _, content := range result.Content {
 			if text, ok := content.(*mcp.TextContent); ok {
-				message := text.Text
-				if len(message) > 1024 {
-					message = message[:1024]
-				}
-				return nil, fmt.Errorf("parallel: search tool error: %s", message)
+				return nil, fmt.Errorf("parallel: search tool error: %s", truncateText(text.Text, parallelMaxErrLen))
 			}
 		}
 		return nil, fmt.Errorf("parallel: search tool returned an error")
@@ -130,12 +132,7 @@ func (t parallelTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
 		resp.Body.Close()
-		var after time.Duration
-		if seconds, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && seconds > 0 {
-			after = time.Duration(seconds) * time.Second
-		} else if date, err := http.ParseTime(resp.Header.Get("Retry-After")); err == nil {
-			after = time.Until(date)
-		}
+		after := parallelRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 		return nil, fmt.Errorf("parallel: rate limited: %w", &circuit.RateLimitError{After: after})
 	}
 	resp.Body = struct {
@@ -143,6 +140,28 @@ func (t parallelTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		io.Closer
 	}{io.LimitReader(resp.Body, parallelMaxBytes), resp.Body}
 	return resp, nil
+}
+
+// parallelRetryAfter parses a Retry-After header (delta-seconds or HTTP date)
+// into the cooldown the breaker should honor. A missing, unparseable, or
+// non-positive value yields 0, which leaves the breaker on its configured
+// default; anything longer than parallelMaxRetryAfter is clamped so a bad
+// header cannot hold the breaker open.
+func parallelRetryAfter(header string, now time.Time) time.Duration {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return 0
+	}
+	var after time.Duration
+	if seconds, err := strconv.Atoi(header); err == nil {
+		after = time.Duration(seconds) * time.Second
+	} else if date, err := http.ParseTime(header); err == nil {
+		after = date.Sub(now)
+	}
+	if after <= 0 {
+		return 0
+	}
+	return min(after, parallelMaxRetryAfter)
 }
 
 func parallelResults(result *mcp.CallToolResult, count int) ([]SearchResult, error) {

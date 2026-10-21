@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -182,6 +183,64 @@ func TestParallelRateLimitAndCancellation(t *testing.T) {
 				t.Fatalf("expected context error, got %v", err)
 			}
 		})
+	}
+}
+
+func TestParallelRetryAfter(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	for _, tc := range []struct {
+		header string
+		want   time.Duration
+	}{
+		{"", 0},
+		{"120", 120 * time.Second},
+		{"  60 ", 60 * time.Second},
+		{"0", 0},
+		{"-30", 0},
+		{"not-a-duration", 0},
+		{"99999999", parallelMaxRetryAfter},
+		{now.Add(2 * time.Minute).Format(http.TimeFormat), 2 * time.Minute},
+		{now.Add(-time.Hour).Format(http.TimeFormat), 0},
+		{now.Add(72 * time.Hour).Format(http.TimeFormat), parallelMaxRetryAfter},
+	} {
+		if got := parallelRetryAfter(tc.header, now); got != tc.want {
+			t.Errorf("parallelRetryAfter(%q) = %v, want %v", tc.header, got, tc.want)
+		}
+	}
+}
+
+// TestParallelBoundsUntrustedText checks that unbounded upstream text cannot
+// flow through verbatim, and that neither cap can split a multi-byte rune.
+func TestParallelBoundsUntrustedText(t *testing.T) {
+	t.Parallel()
+	excerpt := strings.Repeat("é", 4000)
+	result := &mcp.CallToolResult{StructuredContent: map[string]any{
+		"results": []any{map[string]any{"url": "https://example.com", "excerpts": []string{excerpt}}},
+	}}
+	got, err := parallelResults(result, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := utf8.RuneCountInString(got[0].Snippet); n != parallelMaxSnippetRunes+len("...") {
+		t.Fatalf("snippet was not capped: %d runes", n)
+	}
+	if !utf8.ValidString(got[0].Snippet) {
+		t.Fatal("snippet truncation split a rune")
+	}
+
+	deps, _ := parallelTestDeps(t, func(http.ResponseWriter, *http.Request, json.RawMessage) any {
+		return map[string]any{"isError": true, "content": []any{map[string]any{"type": "text", "text": strings.Repeat("é", 4000)}}}
+	})
+	_, err = NewParallelProvider(deps).Web(context.Background(), WebSearchParams{Query: "Go"})
+	if err == nil {
+		t.Fatal("expected a tool error")
+	}
+	if !utf8.ValidString(err.Error()) {
+		t.Fatal("error truncation split a rune")
+	}
+	if n := utf8.RuneCountInString(err.Error()); n > parallelMaxErrLen+100 {
+		t.Fatalf("error message was not capped: %d runes", n)
 	}
 }
 
