@@ -54,8 +54,9 @@ func TestParallelLiveWebSearchTool(t *testing.T) {
 	defer cancel()
 	transport := &parallelLiveTransport{t: t}
 	deps := setupTestDeps()
-	// Empty provider config means no saved/environment credentials are loaded.
-	deps.SearchProviders = search.AvailableProviders(config.SearchConfig{}, search.Deps{HTTPClient: &http.Client{Transport: transport, Timeout: 30 * time.Second}})
+	// Only the opt-in toggle is set: no saved/environment credentials are
+	// loaded, so this exercises the anonymous path.
+	deps.SearchProviders = search.AvailableProviders(config.SearchConfig{ParallelEnabled: true}, search.Deps{HTTPClient: &http.Client{Transport: transport, Timeout: 30 * time.Second}})
 	client := connectTestClient(ctx, t, createTestServer(deps))
 	defer client.Close()
 	res, err := client.CallTool(ctx, &mcp.CallToolParams{Name: "web_search", Arguments: map[string]any{"provider": "parallel", "query": "Go programming language official documentation", "num_results": 2}})

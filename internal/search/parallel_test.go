@@ -25,17 +25,22 @@ const parallelSample = `{"results":[{"title":"Go documentation","url":"https://g
 type parallelTestTransport struct {
 	base http.RoundTripper
 	url  string
+	auth string // expected Authorization header; "" means anonymous
 	t    *testing.T
 }
 
 func (r parallelTestTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.URL.String() != parallelMCPURL || req.UserAgent() != parallelUserAgent || req.Header.Get("Authorization") != "" {
+	if req.URL.String() != parallelMCPURL || req.UserAgent() != parallelUserAgent || req.Header.Get("Authorization") != r.auth {
 		r.t.Errorf("unexpected destination or headers: %s %v", req.URL, req.Header)
 	}
 	return (&rewriteTransport{baseURL: r.url, inner: r.base}).RoundTrip(req)
 }
 
 func parallelTestDeps(t *testing.T, call func(http.ResponseWriter, *http.Request, json.RawMessage) any) (Deps, *atomic.Int32) {
+	return parallelTestDepsAuth(t, "", call)
+}
+
+func parallelTestDepsAuth(t *testing.T, auth string, call func(http.ResponseWriter, *http.Request, json.RawMessage) any) (Deps, *atomic.Int32) {
 	t.Helper()
 	requests := new(atomic.Int32)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +78,7 @@ func parallelTestDeps(t *testing.T, call func(http.ResponseWriter, *http.Request
 	}))
 	t.Cleanup(srv.Close)
 	client := srv.Client()
-	client.Transport = parallelTestTransport{base: client.Transport, url: srv.URL, t: t}
+	client.Transport = parallelTestTransport{base: client.Transport, url: srv.URL, auth: auth, t: t}
 	return newTestDeps(client), requests
 }
 
@@ -96,7 +101,7 @@ func TestParallelFactoryAndWeb(t *testing.T) {
 		}
 		return map[string]any{"content": []any{}, "structuredContent": json.RawMessage(parallelSample)}
 	})
-	cfg := config.SearchConfig{Provider: "parallel"}
+	cfg := config.SearchConfig{Provider: "parallel", ParallelEnabled: true}
 	for _, p := range []Provider{NewProvider(cfg, deps), NewProviderByName("parallel", cfg, deps), AvailableProviders(cfg, deps)["parallel"]} {
 		if p == nil || p.Name() != "parallel" {
 			t.Fatalf("factory did not select Parallel: %T", p)
@@ -134,7 +139,7 @@ func TestParallelResponseVariants(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			deps, _ := parallelTestDeps(t, func(http.ResponseWriter, *http.Request, json.RawMessage) any { return tc.body })
-			results, err := NewProviderByName("parallel", config.SearchConfig{}, deps).Web(context.Background(), WebSearchParams{Query: "Go"})
+			results, err := NewProviderByName("parallel", config.SearchConfig{ParallelEnabled: true}, deps).Web(context.Background(), WebSearchParams{Query: "Go"})
 			if (err != nil) != tc.err || len(results) != tc.want {
 				t.Fatalf("got %v, %v", results, err)
 			}
@@ -150,7 +155,7 @@ func TestParallelRateLimitAndCancellation(t *testing.T) {
 			w.WriteHeader(http.StatusTooManyRequests)
 			return nil
 		})
-		_, err := NewParallelProvider(deps).Web(context.Background(), WebSearchParams{Query: "Go"})
+		_, err := NewParallelProvider("", deps).Web(context.Background(), WebSearchParams{Query: "Go"})
 		if !errors.Is(err, circuit.ErrRateLimit) {
 			t.Fatalf("expected typed rate limit, got %v", err)
 		}
@@ -178,11 +183,89 @@ func TestParallelRateLimitAndCancellation(t *testing.T) {
 			if mode == "cancel" {
 				go func() { <-started; cancel() }()
 			}
-			_, err := NewParallelProvider(deps).Web(ctx, WebSearchParams{Query: "Go"})
+			_, err := NewParallelProvider("", deps).Web(ctx, WebSearchParams{Query: "Go"})
 			if err == nil || ctx.Err() == nil {
 				t.Fatalf("expected context error, got %v", err)
 			}
 		})
+	}
+}
+
+// TestParallelRequiresOptIn covers the operator egress gate: without
+// PARALLEL_ENABLED the provider must not be constructible by any route, so
+// provider:"parallel" has nothing to resolve to.
+func TestParallelRequiresOptIn(t *testing.T) {
+	t.Parallel()
+	deps, requests := parallelTestDeps(t, func(http.ResponseWriter, *http.Request, json.RawMessage) any {
+		t.Error("disabled provider made a request")
+		return nil
+	})
+	off := config.SearchConfig{Provider: "parallel"}
+	if p := NewProviderByName("parallel", off, deps); p != nil {
+		t.Fatalf("NewProviderByName built a disabled provider: %T", p)
+	}
+	if _, ok := AvailableProviders(off, deps)["parallel"]; ok {
+		t.Fatal("AvailableProviders registered a disabled provider")
+	}
+	// SEARCH_PROVIDER=parallel is rejected at config load, but the factory
+	// must still degrade to the zero-config default rather than opening the
+	// new egress path.
+	if got := NewProvider(off, deps).Name(); got != "duckduckgo" {
+		t.Fatalf("disabled parallel resolved to %s", got)
+	}
+	if got := NewProvider(config.SearchConfig{Provider: "parallel", GoogleAPIKey: "key", GoogleCX: "cx"}, deps).Name(); got != "google" {
+		t.Fatalf("disabled parallel resolved to %s", got)
+	}
+	if requests.Load() != 0 {
+		t.Fatal("disabled provider reached the network")
+	}
+}
+
+// TestParallelAPIKey checks the optional Bearer credential reaches every
+// request, including the MCP initialize handshake.
+func TestParallelAPIKey(t *testing.T) {
+	t.Parallel()
+	deps, _ := parallelTestDepsAuth(t, "Bearer secret-key", func(http.ResponseWriter, *http.Request, json.RawMessage) any {
+		return map[string]any{"content": []any{}, "structuredContent": json.RawMessage(parallelSample)}
+	})
+	cfg := config.SearchConfig{ParallelEnabled: true, ParallelAPIKey: "secret-key"}
+	if _, err := NewProviderByName("parallel", cfg, deps).Web(context.Background(), WebSearchParams{Query: "Go"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestParallelSessionID checks the stable free-tier rate-limit identifier is
+// sent and does not change between calls on one provider instance.
+func TestParallelSessionID(t *testing.T) {
+	t.Parallel()
+	var seen []string
+	var mu sync.Mutex
+	deps, _ := parallelTestDeps(t, func(_ http.ResponseWriter, _ *http.Request, args json.RawMessage) any {
+		var call struct {
+			Arguments struct {
+				SessionID string `json:"session_id"`
+			} `json:"arguments"`
+		}
+		if err := json.Unmarshal(args, &call); err != nil {
+			t.Error(err)
+			return nil
+		}
+		mu.Lock()
+		seen = append(seen, call.Arguments.SessionID)
+		mu.Unlock()
+		return map[string]any{"content": []any{}, "structuredContent": json.RawMessage(parallelSample)}
+	})
+	p := NewParallelProvider("", deps)
+	for range 2 {
+		if _, err := p.Web(context.Background(), WebSearchParams{Query: "Go"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(seen) != 2 || seen[0] != seen[1] || len(seen[0]) != 32 {
+		t.Fatalf("session_id was not a stable 32-char value: %q", seen)
+	}
+	if other := NewParallelProvider("", deps).sessionID; other == seen[0] {
+		t.Fatal("session_id is not per-provider random")
 	}
 }
 
@@ -232,7 +315,7 @@ func TestParallelBoundsUntrustedText(t *testing.T) {
 	deps, _ := parallelTestDeps(t, func(http.ResponseWriter, *http.Request, json.RawMessage) any {
 		return map[string]any{"isError": true, "content": []any{map[string]any{"type": "text", "text": strings.Repeat("é", 4000)}}}
 	})
-	_, err = NewParallelProvider(deps).Web(context.Background(), WebSearchParams{Query: "Go"})
+	_, err = NewParallelProvider("", deps).Web(context.Background(), WebSearchParams{Query: "Go"})
 	if err == nil {
 		t.Fatal("expected a tool error")
 	}
@@ -244,10 +327,40 @@ func TestParallelBoundsUntrustedText(t *testing.T) {
 	}
 }
 
+// TestParallelExcludedFromImplicitPriority covers allProviderNames(): with no
+// list configured for an operation the router falls back to every registered
+// provider, and Parallel must stay out of that implicit set for every
+// operation while an explicit list still reaches it.
+func TestParallelExcludedFromImplicitPriority(t *testing.T) {
+	t.Parallel()
+	providers := map[string]Provider{
+		"parallel": NewParallelProvider("", newTestDeps(http.DefaultClient)),
+		"legacy":   newChaosProvider("legacy", true),
+	}
+	r := NewRouter(providers, RouterConfig{})
+	for _, op := range []Operation{OpWeb, OpImages, OpNews, OpPatents, OpAcademic} {
+		got := r.priorityFor(op)
+		if len(got) != 1 || got[0] != "legacy" {
+			t.Errorf("implicit %s priority included an opt-in provider: %v", op, got)
+		}
+	}
+
+	routing, err := ParseRoutingConfig(`{"web":"parallel,legacy","images":"parallel","news":"parallel","patents":"parallel","academic":"parallel"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	explicit := NewRouter(providers, RouterConfig{Routing: routing})
+	for _, op := range []Operation{OpWeb, OpImages, OpNews, OpPatents, OpAcademic} {
+		if got := explicit.priorityFor(op); len(got) == 0 || got[0] != "parallel" {
+			t.Errorf("explicit %s priority dropped the configured provider: %v", op, got)
+		}
+	}
+}
+
 func TestParallelUnsupportedAndLimit(t *testing.T) {
 	t.Parallel()
 	deps, requests := parallelTestDeps(t, func(http.ResponseWriter, *http.Request, json.RawMessage) any { t.Error("unexpected call"); return nil })
-	p := NewParallelProvider(deps)
+	p := NewParallelProvider("", deps)
 	if r, err := p.Images(context.Background(), ImageSearchParams{}); r != nil || err != nil {
 		t.Fatal(r, err)
 	}

@@ -55,7 +55,7 @@ func (tr parallelToolTransport) RoundTrip(r *http.Request) (*http.Response, erro
 func TestParallelWebSearchTool(t *testing.T) {
 	t.Parallel()
 	deps := setupTestDeps()
-	deps.SearchProviders = search.AvailableProviders(config.SearchConfig{}, search.Deps{HTTPClient: &http.Client{Transport: parallelToolTransport{t: t}}})
+	deps.SearchProviders = search.AvailableProviders(config.SearchConfig{ParallelEnabled: true}, search.Deps{HTTPClient: &http.Client{Transport: parallelToolTransport{t: t}}})
 	client := connectTestClient(context.Background(), t, createTestServer(deps))
 	defer client.Close()
 	res, err := client.CallTool(context.Background(), &mcp.CallToolParams{Name: "web_search", Arguments: map[string]any{
@@ -108,7 +108,7 @@ func TestParallelPartialRoutingRemainsOptIn(t *testing.T) {
 				t.Fatal(err)
 			}
 			deps := setupTestDeps()
-			parallel := search.AvailableProviders(config.SearchConfig{}, search.Deps{HTTPClient: &http.Client{Transport: parallelToolTransport{t: t}}})["parallel"]
+			parallel := search.AvailableProviders(config.SearchConfig{ParallelEnabled: true}, search.Deps{HTTPClient: &http.Client{Transport: parallelToolTransport{t: t}}})["parallel"]
 			providers := map[string]search.Provider{"parallel": parallel, "legacy": parallelLegacyFailure{}}
 			deps.SearchProviders = providers
 			deps.Search = search.NewRouter(providers, search.RouterConfig{Routing: routing})

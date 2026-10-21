@@ -2,6 +2,8 @@ package search
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,16 +34,35 @@ const parallelMaxSnippetRunes = 500
 
 var _ Provider = (*ParallelProvider)(nil)
 
-// ParallelProvider searches through the anonymous Parallel Search MCP endpoint.
-// It uses Fast mode without credentials and supports web search only.
+// ParallelProvider searches through the Parallel Search MCP endpoint. It is
+// opt-in (PARALLEL_ENABLED) and supports web search only. Without a key it
+// runs in anonymous Fast mode; PARALLEL_API_KEY raises the rate limit.
 type ParallelProvider struct {
-	deps Deps
+	deps   Deps
+	apiKey string
+	// sessionID is a random per-process identifier. Parallel keys free-tier
+	// rate limiting (and log correlation) on it and documents reusing one
+	// stable value rather than minting one per call, which would split the
+	// accounting. It carries no user or tenant data.
+	sessionID string
 }
 
-// NewParallelProvider creates a keyless web-search provider using the existing
-// HTTP client (including its SSRF policy, timeouts, and injected test transport).
-func NewParallelProvider(deps Deps) *ParallelProvider {
-	return &ParallelProvider{deps: deps}
+// NewParallelProvider creates the web-search provider using the existing HTTP
+// client (including its SSRF policy, timeouts, and injected test transport).
+// apiKey is optional; empty keeps the connection anonymous.
+func NewParallelProvider(apiKey string, deps Deps) *ParallelProvider {
+	return &ParallelProvider{deps: deps, apiKey: apiKey, sessionID: newParallelSessionID()}
+}
+
+// newParallelSessionID returns a 32-character random hex string, the shape
+// Parallel documents for session_id. A failed read from crypto/rand is not
+// fatal: the field is optional, so the provider just omits it.
+func newParallelSessionID() string {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(buf[:])
 }
 
 func (p *ParallelProvider) Name() string { return "parallel" }
@@ -79,7 +100,7 @@ func (p *ParallelProvider) search(ctx context.Context, params WebSearchParams) (
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
-	client.Transport = parallelTransport{base: transport}
+	client.Transport = parallelTransport{base: transport, apiKey: p.apiKey}
 	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "web-researcher-mcp", Version: "dev"}, nil)
 	session, err := mcpClient.Connect(ctx, &mcp.StreamableClientTransport{
 		Endpoint: parallelMCPURL, HTTPClient: &client,
@@ -101,10 +122,11 @@ func (p *ParallelProvider) search(ctx context.Context, params WebSearchParams) (
 	if params.TimeRange != "" {
 		objective += ". Prefer sources published within the last " + params.TimeRange
 	}
-	result, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      "web_search",
-		Arguments: map[string]any{"objective": objective, "search_queries": []string{query}},
-	})
+	args := map[string]any{"objective": objective, "search_queries": []string{query}}
+	if p.sessionID != "" {
+		args["session_id"] = p.sessionID
+	}
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "web_search", Arguments: args})
 	if err != nil {
 		return nil, fmt.Errorf("parallel: search: %w", err)
 	}
@@ -119,13 +141,20 @@ func (p *ParallelProvider) search(ctx context.Context, params WebSearchParams) (
 	return parallelResults(result, params.NumResults)
 }
 
-// parallelTransport adds project identification to every MCP request, including
-// initialization and notifications, and bounds both JSON and SSE response bodies.
-type parallelTransport struct{ base http.RoundTripper }
+// parallelTransport adds project identification (and the optional API key) to
+// every MCP request, including initialization and notifications, and bounds
+// both JSON and SSE response bodies.
+type parallelTransport struct {
+	base   http.RoundTripper
+	apiKey string
+}
 
 func (t parallelTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
 	req.Header.Set("User-Agent", parallelUserAgent)
+	if t.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+t.apiKey)
+	}
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
 		return nil, err
