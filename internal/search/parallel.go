@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -152,8 +153,12 @@ type parallelTransport struct {
 func (t parallelTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
 	req.Header.Set("User-Agent", parallelUserAgent)
-	if t.apiKey != "" {
+	// http.Client sends redirect hops through this transport too, so pin the key
+	// to the Parallel endpoint itself or a redirect would hand it to another host.
+	if t.apiKey != "" && isParallelEndpoint(req.URL) {
 		req.Header.Set("Authorization", "Bearer "+t.apiKey)
+	} else {
+		req.Header.Del("Authorization")
 	}
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
@@ -171,6 +176,12 @@ func (t parallelTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	return resp, nil
 }
 
+// isParallelEndpoint reports whether u is on the scheme and host of parallelMCPURL.
+func isParallelEndpoint(u *url.URL) bool {
+	endpoint, err := url.Parse(parallelMCPURL)
+	return err == nil && u != nil && u.Scheme == endpoint.Scheme && strings.EqualFold(u.Host, endpoint.Host)
+}
+
 // parallelRetryAfter parses a Retry-After header (delta-seconds or HTTP date)
 // into the cooldown the breaker should honor. A missing, unparseable, or
 // non-positive value yields 0, which leaves the breaker on its configured
@@ -182,7 +193,10 @@ func parallelRetryAfter(header string, now time.Time) time.Duration {
 		return 0
 	}
 	var after time.Duration
-	if seconds, err := strconv.Atoi(header); err == nil {
+	if seconds, err := strconv.ParseInt(header, 10, 64); err == nil {
+		if seconds > int64(parallelMaxRetryAfter/time.Second) {
+			return parallelMaxRetryAfter // also avoids overflow in the multiply below
+		}
 		after = time.Duration(seconds) * time.Second
 	} else if date, err := http.ParseTime(header); err == nil {
 		after = date.Sub(now)

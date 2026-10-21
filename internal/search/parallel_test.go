@@ -283,6 +283,7 @@ func TestParallelRetryAfter(t *testing.T) {
 		{"-30", 0},
 		{"not-a-duration", 0},
 		{"99999999", parallelMaxRetryAfter},
+		{"9223372036854775807", parallelMaxRetryAfter}, // would overflow time.Duration
 		{now.Add(2 * time.Minute).Format(http.TimeFormat), 2 * time.Minute},
 		{now.Add(-time.Hour).Format(http.TimeFormat), 0},
 		{now.Add(72 * time.Hour).Format(http.TimeFormat), parallelMaxRetryAfter},
@@ -392,5 +393,51 @@ func TestParallelResultsRejectsOversizedPayload(t *testing.T) {
 	result := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: big}}}
 	if _, err := parallelResults(result, 5); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("expected size error, got %v", err)
+	}
+}
+
+type parallelRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f parallelRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestParallelAPIKeyStaysOnParallelHost: the Bearer key goes only to the Parallel
+// endpoint. A redirect hop to another host, or to plain http on the same host,
+// must not carry it (http.Client sends every hop through the transport).
+func TestParallelAPIKeyStaysOnParallelHost(t *testing.T) {
+	t.Parallel()
+	for _, location := range []string{
+		"https://other.example/x",
+		"http://search.parallel.ai/mcp",
+		"https://search.parallel.ai.evil.example/mcp",
+	} {
+		t.Run(location, func(t *testing.T) {
+			t.Parallel()
+			seen := map[string]string{} // request URL -> Authorization header
+			base := parallelRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+				seen[r.URL.String()] = r.Header.Get("Authorization")
+				resp := &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: http.Header{}, Request: r}
+				if r.URL.String() == parallelMCPURL {
+					resp.StatusCode = http.StatusFound
+					resp.Header.Set("Location", location)
+				}
+				return resp, nil
+			})
+			client := &http.Client{Transport: parallelTransport{base: base, apiKey: "secret-key"}}
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, parallelMCPURL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if got := seen[parallelMCPURL]; got != "Bearer secret-key" {
+				t.Errorf("Parallel endpoint Authorization = %q, want the key", got)
+			}
+			if got, ok := seen[location]; !ok || got != "" {
+				t.Errorf("redirect target %s: seen=%v Authorization=%q, want no key", location, ok, got)
+			}
+		})
 	}
 }
