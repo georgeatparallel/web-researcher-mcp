@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -160,9 +161,15 @@ func TestParallelRateLimitAndCancellation(t *testing.T) {
 	for _, mode := range []string{"cancel", "deadline"} {
 		t.Run(mode, func(t *testing.T) {
 			started := make(chan struct{})
+			var once sync.Once
 			deps, _ := parallelTestDeps(t, func(w http.ResponseWriter, r *http.Request, args json.RawMessage) any {
-				close(started)
-				<-r.Context().Done()
+				once.Do(func() { close(started) })
+				// Bounded so the test server can always shut down, even if the
+				// client never drops the connection.
+				select {
+				case <-r.Context().Done():
+				case <-time.After(5 * time.Second):
+				}
 				return nil
 			})
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
