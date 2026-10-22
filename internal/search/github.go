@@ -123,6 +123,8 @@ func (p *GitHubProvider) Images(_ context.Context, _ ImageSearchParams) ([]Image
 	return nil, nil
 }
 
+func (p *GitHubProvider) SupportedOperations() []Operation { return opsWebNews }
+
 func (p *GitHubProvider) News(ctx context.Context, params NewsSearchParams) ([]NewsResult, error) {
 	webParams := WebSearchParams{
 		Query:      params.Query,
