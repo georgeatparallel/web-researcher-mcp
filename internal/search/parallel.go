@@ -90,6 +90,9 @@ func (p *ParallelProvider) Web(ctx context.Context, params WebSearchParams) ([]S
 	return results, err
 }
 
+// SupportedOperations implements OperationSupport: web search only.
+func (p *ParallelProvider) SupportedOperations() []Operation { return opsWeb }
+
 // Images and News return the unsupported-capability sentinel without making
 // requests or tripping the breaker.
 func (p *ParallelProvider) Images(context.Context, ImageSearchParams) ([]ImageResult, error) {
